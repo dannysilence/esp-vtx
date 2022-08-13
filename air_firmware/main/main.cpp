@@ -690,8 +690,9 @@ esp_err_t set_wifi_fixed_rate(WIFI_Rate value)
         WIFI_PHY_RATE_MCS7_LGI,
         WIFI_PHY_RATE_MCS7_SGI,
     };
-    esp_err_t err = esp_wifi_internal_set_fix_rate(ESP_WIFI_IF, true, (wifi_phy_rate_t)rates[(int)value]);
-    //esp_err_t err = esp_wifi_internal_set_fix_rate(ESP_WIFI_IF, true, (wifi_phy_rate_t)value);
+    //esp_err_t err = esp_wifi_internal_set_fix_rate(ESP_WIFI_IF, true, (wifi_phy_rate_t)rates[(int)value]);
+    
+    esp_err_t err = esp_wifi_config_80211_tx_rate(ESP_WIFI_IF, (wifi_phy_rate_t)rates[(int)value]);
     if (err == ESP_OK)
         s_wlan_rate = value;
     return err;
@@ -1161,6 +1162,8 @@ void setup_wifi()
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(packet_received_cb));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
+    esp_wifi_set_bandwidth(ESP_WIFI_IF,WIFI_BW_HT20);
+
 
     set_wlan_power_dBm(20.f);
 
@@ -1349,7 +1352,7 @@ static void init_camera()
     config.pin_reset = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size = FRAMESIZE_SVGA;
+    config.frame_size = FRAMESIZE_VGA;
     config.jpeg_quality = 4;
     config.fb_count = 3;
 
@@ -1362,7 +1365,7 @@ static void init_camera()
     }
 
     sensor_t *s = esp_camera_sensor_get();
-    s->set_framesize(s, FRAMESIZE_SVGA);
+    s->set_framesize(s, FRAMESIZE_VGA);
     s->set_saturation(s, 0);
 }
 
