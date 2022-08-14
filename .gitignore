@@ -37,3 +37,4 @@ deploy.sh
 .DS_Store
 sdkconfig.old
 air_firmware/build
+.vscode

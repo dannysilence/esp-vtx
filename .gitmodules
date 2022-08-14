@@ -1,0 +1,3 @@
+[submodule "wifibroadcast"]
+	path = wifibroadcast
+	url = git@github.com:Ncerzzk/wifibroadcast.git

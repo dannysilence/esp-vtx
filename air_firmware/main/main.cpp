@@ -25,6 +25,8 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#include "sodium.h"
+
 #include "fec_codec.h"
 #include "packets.h"
 #include "safe_printf.h"
@@ -1427,6 +1429,35 @@ static void print_cpu_usage()
 #endif
 }
 
+
+// uint8_t data[1000]={1,2,4,5,15,5,5,5,5,5,50};
+// uint8_t outdata[1444]={0};
+// extern "C" void app_main()
+// {
+
+
+//     uint64_t outsize;
+//     uint64_t cnt=0;
+//     uint8_t key[32]={1,2,3,4,56,6};
+//     srand(esp_timer_get_time());
+
+//     printf("Initializing...\n");
+    
+//     while (true)
+//     {
+//         esp_task_wdt_reset();
+//         uint64_t t1=micros();
+//         crypto_aead_chacha20poly1305_encrypt(outdata,&outsize,data,sizeof(data),NULL,0,NULL,(uint8_t *)&cnt,key);
+//         uint64_t t2=micros();
+//         cnt++;
+//         printf("encrypt time=%lld outsize:%lld \n",t2-t1,outsize); 
+//         vTaskDelay(10);
+        
+//     }
+// }
+
+
+
 extern "C" void app_main()
 {
     Ground2Air_Data_Packet& ground2air_data_packet = s_ground2air_data_packet;
@@ -1492,9 +1523,9 @@ extern "C" void app_main()
         if (s_uart_verbose > 0 && millis() - s_stats_last_tp >= 1000)
         {
             s_stats_last_tp = millis();
-            LOG("WLAN S: %d, R: %d, E: %d, D: %d, %%: %d || FPS: %d, D: %d || D: %d, E: %d\n",
-                s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_wlan_outgoing_queue.size() * 100 / s_wlan_outgoing_queue.capacity(),
-                (int)s_stats.video_frames, s_stats.video_data, s_stats.sd_data, s_stats.sd_drops);
+            //LOG("WLAN S: %d, R: %d, E: %d, D: %d, %%: %d || FPS: %d, D: %d || D: %d, E: %d\n",
+            //    s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_wlan_outgoing_queue.size() * 100 / s_wlan_outgoing_queue.capacity(),
+            //    (int)s_stats.video_frames, s_stats.video_data, s_stats.sd_data, s_stats.sd_drops);
             print_cpu_usage();
 
             s_stats = Stats();
