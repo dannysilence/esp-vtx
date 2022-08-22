@@ -3,18 +3,19 @@
 
 #include <stdint.h>
 #include "sodium.h"
+#include "fec.h"
+#include "wifibroadcast.hpp"
 
 
 class Transmitter
 {
 public:
-    Transmitter(int k, int m, const std::string &keypair);
+    Transmitter(int k, int m,uint8_t radio_port);
     virtual ~Transmitter();
     void send_packet(const uint8_t *buf, size_t size, uint8_t flags);
     void send_session_key(void);
-    virtual void select_output(int idx) = 0;
 protected:
-    virtual void inject_packet(const uint8_t *buf, size_t size) = 0;
+    void inject_packet(const uint8_t *buf, size_t size);
 
 private:
     void send_block_fragment(size_t packet_size);
@@ -27,12 +28,18 @@ private:
     uint8_t fragment_idx;
     uint8_t** block;
     size_t max_packet_size;
-
+    uint8_t radio_port;
     // tx->rx keypair
     uint8_t tx_secretkey[crypto_box_SECRETKEYBYTES];
     uint8_t rx_publickey[crypto_box_PUBLICKEYBYTES];
     uint8_t session_key[crypto_aead_chacha20poly1305_KEYBYTES];
+    uint8_t txbuf[MAX_PACKET_SIZE];
     wsession_key_t session_key_packet;
+
+    uint16_t ieee80211_seq=0;
+
+    uint8_t ciphertext[MAX_FORWARDER_PACKET_SIZE];
+
 };
 
 #endif

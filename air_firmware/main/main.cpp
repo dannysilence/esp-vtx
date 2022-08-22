@@ -26,16 +26,20 @@
 #include "freertos/semphr.h"
 
 #include "sodium.h"
+#include "esp_wb.hpp"
+#include "fec.h"
 
-#include "fec_codec.h"
+#include "driver/gpio.h"
+#include "main.h"
+#include "queue.h"
 #include "packets.h"
 #include "safe_printf.h"
 #include "structures.h"
 #include "crc.h"
-#include "driver/gpio.h"
-#include "main.h"
-#include "queue.h"
 #include "circular_buffer.h"
+
+
+Transmitter transmitter(8,12,0);
 
 
 //#define WIFI_AP
@@ -168,8 +172,6 @@ static TaskHandle_t s_wifi_rx_task = nullptr;
 /////////////////////////////////////////////////////////////////////////
 
 static size_t s_video_frame_data_size = 0;
-static uint32_t s_video_frame_index = 0;
-static uint8_t s_video_part_index = 0;
 static bool s_video_frame_started = false;
 
 static int64_t s_video_last_sent_tp = esp_timer_get_time();
@@ -355,11 +357,6 @@ IRAM_ATTR void cancel_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
 
 /////////////////////////////////////////////////////////////////////////
 
-SemaphoreHandle_t s_fec_encoder_mux = xSemaphoreCreateBinary();
-Fec_Codec s_fec_encoder;
-
-SemaphoreHandle_t s_fec_decoder_mux = xSemaphoreCreateBinary();
-Fec_Codec s_fec_decoder;
 
 /////////////////////////////////////////////////////////////////////////
 
@@ -705,244 +702,15 @@ WIFI_Rate get_wifi_fixed_rate()
     return s_wlan_rate;
 }
 
-/*
-IRAM_ATTR static void wifi_ap_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
-{
-}
-*/
-
-int16_t s_wlan_incoming_rssi = 0; //this is protected by the s_wlan_incoming_mux
-
-///////////////////////////////////////////////////////////////////////////////////////////
-
-IRAM_ATTR void add_to_wlan_outgoing_queue(const void* data, size_t size)
-{
-    Wlan_Outgoing_Packet packet;
-
-    xSemaphoreTake(s_wlan_outgoing_mux, portMAX_DELAY);
-    start_writing_wlan_outgoing_packet(packet, size);
-
-    if (packet.ptr)
-    {
-        memcpy(packet.payload_ptr, data, size);
-        //LOG("Sending packet of size %d\n", packet.size);
-    }
-
-    end_writing_wlan_outgoing_packet(packet);
-    xSemaphoreGive(s_wlan_outgoing_mux);
-
-    //xSemaphoreGive(s_wifi_semaphore);
-    if (s_wifi_tx_task)
-        xTaskNotifyGive(s_wifi_tx_task); //notify task
-    //LOG("gave semaphore\n");
-}
-
-IRAM_ATTR void add_to_wlan_incoming_queue(const void* data, size_t size)
-{
-    Wlan_Incoming_Packet packet;
-
-    xSemaphoreTake(s_wlan_incoming_mux, portMAX_DELAY);
-    start_writing_wlan_incoming_packet(packet, size);
-
-    if (packet.ptr)
-        memcpy(packet.ptr, data, size);
-
-    //LOG("Sending packet of size %d\n", packet.size);
-
-    end_writing_wlan_incoming_packet(packet);
-    xSemaphoreGive(s_wlan_incoming_mux);
-
-    if (s_wifi_rx_task)
-        xTaskNotifyGive(s_wifi_rx_task); //notify task
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////
 
 IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 {
-    if (type == WIFI_PKT_MGMT)
-    {
-        //LOG("management packet\n");
-        return;
-    }
-    else if (type == WIFI_PKT_DATA)
-    {
-        //LOG("data packet\n");
-    }
-    else if (type == WIFI_PKT_MISC)
-    {
-        //LOG("misc packet\n");
-        return;
-    }
-
-    wifi_promiscuous_pkt_t *pkt = reinterpret_cast<wifi_promiscuous_pkt_t*>(buf);
-
-    uint16_t len = pkt->rx_ctrl.sig_len;
-    //s_stats.wlan_data_received += len;
-    //s_stats.wlan_data_sent += 1;
-
-    if (len <= WLAN_IEEE_HEADER_SIZE)
-        return;
-
-    //LOG("Recv %d bytes\n", len);
-    //LOG("Channel: %d\n", (int)pkt->rx_ctrl.channel);
-
-    //uint8_t broadcast_mac[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-    //LOG("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    uint8_t *data = pkt->payload;
-    if (memcmp(data + 10, WLAN_IEEE_HEADER_GROUND2AIR + 10, 6) != 0)
-        return;
-
-    if (len <= WLAN_IEEE_HEADER_SIZE)
-    {
-        LOG("WLAN receive header error");
-        s_stats.wlan_error_count++;
-        return;
-    }
-
-    data += WLAN_IEEE_HEADER_SIZE;
-    len -= WLAN_IEEE_HEADER_SIZE; //skip the 802.11 header
-
-    len -= 4; //the received length has 4 more bytes at the end for some reason.
-
-    int16_t rssi = pkt->rx_ctrl.rssi;
-    /*  if (s_uart_verbose >= 1)
-  {
-    printf("RSSI: %d, CH: %d, SZ: %d\n", rssi, pkt->rx_ctrl.channel, len);
-    if (s_uart_verbose >= 2)
-    {
-      printf("---->\n");
-      write(data, len);
-      printf("\n<----\n");
-    }
-  }
-*/
-
-    size_t size = std::min<size_t>(len, WLAN_MAX_PAYLOAD_SIZE);
-
-    xSemaphoreTake(s_wlan_incoming_mux, portMAX_DELAY);
-    s_wlan_incoming_rssi = rssi;
-    xSemaphoreGive(s_wlan_incoming_mux);
-
-    xSemaphoreTake(s_fec_decoder_mux, portMAX_DELAY);
-    if (!s_fec_decoder.decode_data(data, size, false))
-        s_stats.wlan_received_packets_dropped++;
-    xSemaphoreGive(s_fec_decoder_mux);
-
-    s_stats.wlan_data_received += len;
+    //;
 }
 
-/////////////////////////////////////////////////////////////////////////
 
-IRAM_ATTR void fec_encoded_cb(void *data, size_t size)
-{
-    add_to_wlan_outgoing_queue(data, size);
-}
 
-IRAM_ATTR void fec_decoded_cb(void *data, size_t size)
-{
-    add_to_wlan_incoming_queue(data, size);
-}
-
-/////////////////////////////////////////////////////////////////////////
-
-static void handle_ground2air_config_packet(Ground2Air_Config_Packet& src)
-{
-    Ground2Air_Config_Packet& dst = s_ground2air_config_packet;
-    if (dst.wifi_rate != src.wifi_rate)
-    {
-        LOG("Wifi rate changed from %d to %d\n", (int)dst.wifi_rate, (int)src.wifi_rate);
-        ESP_ERROR_CHECK(set_wifi_fixed_rate(src.wifi_rate));
-    }
-    if (dst.wifi_power != src.wifi_power)
-    {
-        LOG("Wifi power changed from %d to %d\n", (int)dst.wifi_power, (int)src.wifi_power);
-        ESP_ERROR_CHECK(set_wlan_power_dBm(src.wifi_power));
-    }
-    if (dst.fec_codec_k != src.fec_codec_k || dst.fec_codec_n != src.fec_codec_n || dst.fec_codec_mtu != src.fec_codec_mtu)
-    {
-        LOG("FEC codec changed from %d/%d/%d to %d/%d/%d\n", (int)dst.fec_codec_k, (int)dst.fec_codec_n, (int)dst.fec_codec_mtu, (int)src.fec_codec_k, (int)src.fec_codec_n, (int)src.fec_codec_mtu);
-        {
-            //binary semaphores have to be given first
-            xSemaphoreGive(s_fec_encoder_mux);
-
-            Fec_Codec::Descriptor descriptor;
-            descriptor.coding_k = src.fec_codec_k;
-            descriptor.coding_n = src.fec_codec_n;
-            descriptor.mtu = src.fec_codec_mtu;
-            descriptor.core = Fec_Codec::Core::Any;
-            descriptor.priority = 1;
-            xSemaphoreTake(s_fec_encoder_mux, portMAX_DELAY);
-            if (!s_fec_encoder.init_encoder(descriptor))
-                LOG("Failed to init fec codec\n");
-            else
-                s_fec_encoder.set_data_encoded_cb(&fec_encoded_cb);
-
-            xSemaphoreGive(s_fec_encoder_mux);
-        }
-    }
-    if (dst.camera.resolution != src.camera.resolution)
-    {
-        LOG("Camera resolution changed from %d to %d\n", (int)dst.camera.resolution, (int)src.camera.resolution);
-        sensor_t* s = esp_camera_sensor_get();
-        switch (src.camera.resolution)
-        {
-            case Resolution::QVGA: s->set_framesize(s, FRAMESIZE_QVGA); break;
-            case Resolution::CIF: s->set_framesize(s, FRAMESIZE_CIF); break;
-            case Resolution::HVGA: s->set_framesize(s, FRAMESIZE_HVGA); break;
-            case Resolution::VGA: s->set_framesize(s, FRAMESIZE_VGA); break;
-            case Resolution::SVGA: s->set_framesize(s, FRAMESIZE_SVGA); break;
-            case Resolution::XGA: s->set_framesize(s, FRAMESIZE_XGA); break;
-            case Resolution::SXGA: s->set_framesize(s, FRAMESIZE_SXGA); break;
-            case Resolution::UXGA: s->set_framesize(s, FRAMESIZE_UXGA); break;
-        }
-    }
-    if (dst.camera.fps_limit != src.camera.fps_limit)
-    {
-        if (src.camera.fps_limit == 0)
-            s_video_target_frame_dt = 0;
-        else
-            s_video_target_frame_dt = 1000000 / src.camera.fps_limit;
-        LOG("Target FPS changed from %d to %d\n", (int)dst.camera.fps_limit, (int)src.camera.fps_limit);
-    }
-
-#define APPLY(n1, n2, type) \
-    if (dst.camera.n1 != src.camera.n1) \
-    { \
-        LOG("Camera " #n1 " from %d to %d\n", (int)dst.camera.n1, (int)src.camera.n1); \
-        sensor_t* s = esp_camera_sensor_get(); \
-        s->set_##n2(s, (type)src.camera.n1); \
-    }
-    APPLY(quality, quality, int);
-    APPLY(brightness, brightness, int);
-    APPLY(contrast, contrast, int);
-    APPLY(saturation, saturation, int);
-    APPLY(sharpness, sharpness, int);
-    APPLY(denoise, denoise, int);
-    APPLY(gainceiling, gainceiling, gainceiling_t);
-    APPLY(awb, whitebal, int);
-    APPLY(awb_gain, awb_gain, int);
-    APPLY(wb_mode, wb_mode, int);
-    APPLY(agc, gain_ctrl, int);
-    APPLY(agc_gain, agc_gain, int);
-    APPLY(aec, exposure_ctrl, int);
-    APPLY(aec_value, aec_value, int);
-    APPLY(aec2, aec2, int);
-    APPLY(ae_level, ae_level, int);
-    APPLY(hmirror, hmirror, int);
-    APPLY(vflip, vflip, int);
-    APPLY(special_effect, special_effect, int);
-    APPLY(dcw, dcw, int);
-    APPLY(bpc, bpc, int);
-    APPLY(wpc, wpc, int);
-    APPLY(raw_gma, raw_gma, int);
-    APPLY(lenc, lenc, int);
-#undef APPLY
-
-    dst = src;
-}
-
-/////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
 
 #ifdef TX_COMPLETION_CB
 IRAM_ATTR static void wifi_tx_done(uint8_t ifidx, uint8_t *data, uint16_t *data_len, bool txStatus)
@@ -952,186 +720,12 @@ IRAM_ATTR static void wifi_tx_done(uint8_t ifidx, uint8_t *data, uint16_t *data_
 }
 #endif
 
-IRAM_ATTR static void wifi_tx_proc(void *)
-{
-    Wlan_Outgoing_Packet packet;
-
-    while (true)
-    {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); //wait for notification
-        //xSemaphoreTake(s_wifi_semaphore, portMAX_DELAY);
-
-        //LOG("received semaphore\n");
-
-        while (true)
-        {
-            //send pending wlan packets
-            xSemaphoreTake(s_wlan_outgoing_mux, portMAX_DELAY);
-            start_reading_wlan_outgoing_packet(packet);
-            xSemaphoreGive(s_wlan_outgoing_mux);
-
-            if (packet.ptr)
-            {
-                memcpy(packet.ptr, WLAN_IEEE_HEADER_AIR2GROUND, WLAN_IEEE_HEADER_SIZE);
-
-                size_t spins = 0;
-                while (packet.ptr)
-                {
-#ifdef TX_COMPLETION_CB                    
-                    //xSemaphoreTake(s_wifi_tx_done_semaphore, 0); //clear the notif
-#endif
-
-                    esp_err_t res = esp_wifi_80211_tx(ESP_WIFI_IF, packet.ptr, WLAN_IEEE_HEADER_SIZE + packet.size, false);
-                    if (res == ESP_OK)
-                    {
-                        //set_status_led_on();
-                        s_stats.wlan_data_sent += packet.size;
-
-                        xSemaphoreTake(s_wlan_outgoing_mux, portMAX_DELAY);
-                        end_reading_wlan_outgoing_packet(packet);
-                        xSemaphoreGive(s_wlan_outgoing_mux);
-
-#ifdef TX_COMPLETION_CB
-                        //xSemaphoreTake(s_wifi_tx_done_semaphore, portMAX_DELAY); //wait for the tx_done notification
-#endif
-                    }
-                    else if (res == ESP_ERR_NO_MEM) //No TX buffers available, need to poll.
-                    {
-                        spins++;
-                        if (spins > 1000)
-                            vTaskDelay(1);
-                        else
-                            taskYIELD();
-                    }
-                    else //other errors
-                    {
-                        //LOG("Wlan err: %d\n", res);
-                        s_stats.wlan_error_count++;
-                        xSemaphoreTake(s_wlan_outgoing_mux, portMAX_DELAY);
-                        end_reading_wlan_outgoing_packet(packet);
-                        xSemaphoreGive(s_wlan_outgoing_mux);
-                    }
-                }
-            }
-            else
-                break;
-        }
-
-        //update_status_led();
-    }
-}
-
-IRAM_ATTR static void wifi_rx_proc(void *)
-{
-    Wlan_Incoming_Packet packet;
-
-    while (true)
-    {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); //wait for notification
-
-        //LOG("received semaphore\n");
-
-        while (true)
-        {
-            xSemaphoreTake(s_wlan_incoming_mux, portMAX_DELAY);
-            int16_t rssi = s_wlan_incoming_rssi;
-            start_reading_wlan_incoming_packet(packet);
-            xSemaphoreGive(s_wlan_incoming_mux);
-
-            if (packet.ptr)
-            {
-                set_status_led_on();
-                
-                if (packet.size >= sizeof(Ground2Air_Header))
-                {
-                    Ground2Air_Header& header = *(Ground2Air_Header*)packet.ptr;
-                    if (header.size <= packet.size)
-                    {
-                        uint8_t crc = header.crc;
-                        header.crc = 0;
-                        uint8_t computed_crc = crc8(0, packet.ptr, header.size);
-                        if (computed_crc != crc)
-                            LOG("Bad incoming packet %d: bad crc %d != %d\n", (int)header.type, (int)crc, (int)computed_crc);
-                        else
-                        {
-                            switch (header.type)
-                            {
-                                case Ground2Air_Header::Type::Data:
-                                    //handle_ground2air_data_packet(*(Ground2Air_Data_Packet*)packet.ptr);
-                                break;
-                                case Ground2Air_Header::Type::Config:
-                                    handle_ground2air_config_packet(*(Ground2Air_Config_Packet*)packet.ptr);
-                                break;
-                                default:
-                                    LOG("Bad incoming packet: unknown type %d\n", (int)header.type);
-                                break;
-                            }
-                        }
-                    }
-                    else
-                        LOG("Bad incoming packet: header size too big %d > %d\n", (int)header.size, (int)packet.size);
-                }
-                else
-                    LOG("Bad incoming packet: size too small %d < %d\n", (int)packet.size, (int)sizeof(Ground2Air_Header));
-
-
-                xSemaphoreTake(s_wlan_incoming_mux, portMAX_DELAY);
-                end_reading_wlan_incoming_packet(packet);
-                xSemaphoreGive(s_wlan_incoming_mux);
-            }
-            else
-                break;
-        }
-    }
-}
 
 void setup_wifi()
 {
     init_crc8_table();
 
-    init_fec();
     initialize_status_led();
-
-    {
-        //binary semaphores have to be given first
-        xSemaphoreGive(s_fec_encoder_mux);
-
-        Fec_Codec::Descriptor descriptor;
-        descriptor.coding_k = s_ground2air_config_packet.fec_codec_k;
-        descriptor.coding_n = s_ground2air_config_packet.fec_codec_n;
-        descriptor.mtu = s_ground2air_config_packet.fec_codec_mtu;
-        descriptor.core = Fec_Codec::Core::Any;
-        descriptor.priority = 1;
-        xSemaphoreTake(s_fec_encoder_mux, portMAX_DELAY);
-        if (!s_fec_encoder.init_encoder(descriptor))
-            LOG("Failed to init fec codec");
-        else
-            s_fec_encoder.set_data_encoded_cb(&fec_encoded_cb);
-
-        xSemaphoreGive(s_fec_encoder_mux);
-    }
-
-    {
-        //binary semaphores have to be given first
-        xSemaphoreGive(s_fec_decoder_mux);
-
-        Fec_Codec::Descriptor descriptor;
-        descriptor.coding_k = 2;
-        descriptor.coding_n = 6;
-        descriptor.mtu = GROUND2AIR_DATA_MAX_SIZE;
-        descriptor.core = Fec_Codec::Core::Any;
-        descriptor.priority = 1;
-        xSemaphoreTake(s_fec_decoder_mux, portMAX_DELAY);
-        if (!s_fec_decoder.init_decoder(descriptor))
-            LOG("Failed to init fec codec");
-        else
-            s_fec_decoder.set_data_decoded_cb(&fec_decoded_cb);
-
-        xSemaphoreGive(s_fec_decoder_mux);
-    }
- 
-    LOG("MEMORY after fec: \n");
-    heap_caps_print_heap_info(MALLOC_CAP_8BIT);
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     //ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_ap_handler, NULL, NULL));
@@ -1179,36 +773,17 @@ void setup_wifi()
 
 /////////////////////////////////////////////////////////////////////////
 
-IRAM_ATTR void send_air2ground_video_packet(bool last)
+IRAM_ATTR void send_air2ground_video_packet(uint8_t * buf)
 {
-    if (last)
-        s_stats.video_frames++;
-    s_stats.video_data += s_video_frame_data_size;
-
-    uint8_t* packet_data = s_fec_encoder.get_encode_packet_data(true);
-
-    Air2Ground_Video_Packet& packet = *(Air2Ground_Video_Packet*)packet_data;
-    packet.type = Air2Ground_Header::Type::Video;
-    packet.resolution = s_ground2air_config_packet.camera.resolution;
-    packet.frame_index = s_video_frame_index;
-    packet.part_index = s_video_part_index;
-    packet.last_part = last ? 1 : 0;
-    packet.size = s_video_frame_data_size + sizeof(Air2Ground_Video_Packet);
-    packet.pong = s_ground2air_config_packet.ping;
-    packet.crc = 0;
-    packet.crc = crc8(0, &packet, sizeof(Air2Ground_Video_Packet));
-    if (!s_fec_encoder.flush_encode_packet(true))
-    {
-        LOG("Fec codec busy\n");
-        s_stats.wlan_error_count++;
-    }
+    
 }
 
 constexpr size_t PAYLOAD_SIZE = AIR2GROUND_MTU - sizeof(Air2Ground_Video_Packet);
 
+uint8_t CAMERA_BUFFER[2000];
+
 IRAM_ATTR static void camera_data_available(const void* data, size_t stride, size_t count, bool last)
 {
-    xSemaphoreTake(s_fec_encoder_mux, portMAX_DELAY);
 
     if (data == nullptr) //start frame
     {
@@ -1238,98 +813,36 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
                 }
             }
 
-            while (count > 0)
+            uint8_t* packet_data = CAMERA_BUFFER;
+            uint8_t* start_ptr = packet_data;
+            uint8_t* ptr = start_ptr;
+            size_t c = count;
+
+            s_video_frame_data_size += c;
+
+            size_t c8 = c >> 3;
+            for (size_t i = c8; i > 0; i--)
             {
-                if (s_video_frame_data_size >= PAYLOAD_SIZE) //flush prev data?
-                {
-                    //LOG("Flush: %d %d\n", s_video_frame_index, s_video_frame_data_size);
-                    send_air2ground_video_packet(false);
-                    s_video_frame_data_size = 0;
-                    s_video_part_index++;
-                }
-
-                //LOG("Add: %d %d %d %d\n", s_video_frame_index, s_video_part_index, count, s_video_frame_data_size);
-
-                //fill the buffer
-                uint8_t* packet_data = s_fec_encoder.get_encode_packet_data(true);
-                uint8_t* start_ptr = packet_data + sizeof(Air2Ground_Video_Packet) + s_video_frame_data_size;
-                uint8_t* ptr = start_ptr;
-                size_t c = std::min(PAYLOAD_SIZE - s_video_frame_data_size, count);
-
-                count -= c;
-                s_video_frame_data_size += c;
-
-                size_t c8 = c >> 3;
-                for (size_t i = c8; i > 0; i--)
-                {
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                    *ptr++ = *src; src += stride;
-                }
-                for (size_t i = c - (c8 << 3); i > 0; i--)
-                {
-                    *ptr++ = *src; src += stride;
-                }
-
-                if (s_ground2air_config_packet.dvr_record)
-                    add_to_sd_fast_buffer(start_ptr, c);
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
+                *ptr++ = *src; src += stride;
             }
-        }
-
-        //////////////////
-
-        if (last && s_video_frame_started)
-        {
-            s_video_frame_started = false;
-
-            //frame pacing!
-            int64_t now = esp_timer_get_time();
-
-            int64_t acquire_dt = now - s_video_last_acquired_tp;
-            s_video_last_acquired_tp = now;
-
-            int64_t send_dt = now - s_video_last_sent_tp;
-            if (send_dt < s_video_target_frame_dt) //limit fps
-                s_video_skip_frame = true;
-            else                
+            for (size_t i = c - (c8 << 3); i > 0; i--)
             {
-                s_video_skip_frame = false;
-                s_video_last_sent_tp += std::max(s_video_target_frame_dt, acquire_dt);
+                *ptr++ = *src; src += stride;
             }
-
-            //////////////////
-
-            //LOG("Finish: %d %d\n", s_video_frame_index, s_video_frame_data_size);
-            if (s_video_frame_data_size > 0) //left over
-                send_air2ground_video_packet(true);
-
-            s_video_frame_data_size = 0;
-            s_video_frame_index++;
-            s_video_part_index = 0;
+            transmitter.send_packet(CAMERA_BUFFER,count,0);
+            if (s_ground2air_config_packet.dvr_record)
+                add_to_sd_fast_buffer(start_ptr, c);
         }
     }
 
-    xSemaphoreGive(s_fec_encoder_mux);
 }
-
-// IRAM_ATTR static void camera_proc(void* )
-// {
-//     while (true)
-//     {
-//         //NOTE: this only pumps the camera internal queues. The data is processed as it arrives in the camera_data_available callback.
-//         //This should be eliminated as it doesn't serve any purpose but I didn't want to change too much the esp_camera component, as it's quite complex
-//         camera_fb_t* fb = esp_camera_fb_get();
-//         if (!fb) 
-//             LOG("Camera capture failed\n");
-//         else 
-//             esp_camera_fb_return(fb);
-//     }
-// }
 
 static void init_camera()
 {
@@ -1489,18 +1002,6 @@ extern "C" void app_main()
     setup_wifi();
     init_camera();
 
-    {
-        int core = tskNO_AFFINITY;
-        BaseType_t res = xTaskCreatePinnedToCore(&wifi_tx_proc, "Wifi TX", 2048, nullptr, 1, &s_wifi_tx_task, core);
-        if (res != pdPASS)
-            LOG("Failed wifi tx task: %d\n", res);
-    }
-    {
-        int core = tskNO_AFFINITY;
-        BaseType_t res = xTaskCreatePinnedToCore(&wifi_rx_proc, "Wifi RX", 2048, nullptr, 1, &s_wifi_rx_task, core);
-        if (res != pdPASS)
-            LOG("Failed wifi rx task: %d\n", res);
-    }
     {
         int core = tskNO_AFFINITY;
         BaseType_t res = xTaskCreatePinnedToCore(&sd_write_proc, "SD Write", 4096, nullptr, 1, &s_sd_write_task, core);
