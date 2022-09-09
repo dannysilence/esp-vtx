@@ -11,8 +11,50 @@
 #include "fec.h"
 #include "ieee80211_radiotap.h"
 
+#include "key.h"
 
+#include <algorithm>
+
+#include "esp_camera.h"
+//#include "EEPROM.h"
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_wifi.h"
+#include <driver/adc.h>
+#include "esp_adc_cal.h"
+#include "esp_wifi_types.h"
+#include "driver/sdmmc_host.h"
+#include "driver/sdmmc_defs.h"
+#include "sdmmc_cmd.h"
+#include "esp_vfs_fat.h"
+//#include "esp_wifi_internal.h"
+#include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
+#include "esp_private/wifi.h"
+#include "esp_task_wdt.h"
+//#include "bt.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+#include "sodium.h"
+#include "esp_wb.hpp"
+#include "fec.h"
+
+#include "driver/gpio.h"
+#include "main.h"
+#include "queue.h"
+#include "packets.h"
+#include "safe_printf.h"
+#include "structures.h"
+#include "crc.h"
+#include "circular_buffer.h"
+
+#define LOG(...) do { SAFE_PRINTF(__VA_ARGS__); } while (false) 
 #define max(a,b) (a>b?a:b)
+
 
 Transmitter::Transmitter(int k, int n, uint8_t radio_port):  fec_k(k), fec_n(n), block_idx(0),
                                                                 fragment_idx(0),
@@ -48,7 +90,7 @@ void Transmitter::make_session_key(void)
     session_key_packet.packet_type = WFB_PACKET_KEY;
     randombytes_buf(session_key_packet.session_key_nonce, sizeof(session_key_packet.session_key_nonce));
     if (crypto_box_easy(session_key_packet.session_key_data, session_key, sizeof(session_key),
-                        session_key_packet.session_key_nonce, rx_publickey, tx_secretkey) != 0)
+                        session_key_packet.session_key_nonce, (uint8_t *)rx_pubkey, (uint8_t *)tx_secretkey) != 0)
     {
         //throw runtime_error("Unable to make session key!");
         ;
@@ -61,8 +103,8 @@ void  Transmitter::inject_packet(const uint8_t *buf, size_t size)
     uint8_t *p = txbuf;
 
     // radiotap header
-    memcpy(p, radiotap_header, sizeof(radiotap_header));     // may be optimized later
-    p += sizeof(radiotap_header);
+    //memcpy(p, radiotap_header, sizeof(radiotap_header));     // may be optimized later
+    //p += sizeof(radiotap_header);
 
     // ieee80211 header
     memcpy(p, ieee80211_header, sizeof(ieee80211_header));
@@ -92,12 +134,18 @@ void Transmitter::send_block_fragment(size_t packet_size)
     block_hdr->nonce = htobe64(((block_idx & BLOCK_IDX_MASK) << 8) + fragment_idx);
 
     // encrypted payload
-    crypto_aead_chacha20poly1305_encrypt(ciphertext + sizeof(wblock_hdr_t), &ciphertext_len,
+    // encrypt 1000 bytes ~= 400 us
+    TEST_TIME_FUNC(crypto_aead_chacha20poly1305_encrypt(ciphertext + sizeof(wblock_hdr_t), &ciphertext_len,
                                          block[fragment_idx], packet_size,
                                          (uint8_t*)block_hdr, sizeof(wblock_hdr_t),
-                                         NULL, (uint8_t*)(&(block_hdr->nonce)), session_key);
+                                         NULL, (uint8_t*)(&(block_hdr->nonce)), session_key), ENCRYPT);
+
+
+    //inject_packet 1000 bytes  ~= 180 us
+    TEST_TIME_FUNC(inject_packet(ciphertext, sizeof(wblock_hdr_t) + ciphertext_len),INJECT);
+
+ 
     
-    inject_packet(ciphertext, sizeof(wblock_hdr_t) + ciphertext_len);
 }
 
 void Transmitter::send_session_key(void)
@@ -123,13 +171,19 @@ void Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
     memcpy(block[fragment_idx], &packet_hdr, sizeof(packet_hdr));
     memcpy(block[fragment_idx] + sizeof(packet_hdr), buf, size);
 
+
     send_block_fragment(sizeof(packet_hdr) + size);
+
+
     max_packet_size = max(max_packet_size, sizeof(packet_hdr) + size);
     fragment_idx += 1;
 
     if (fragment_idx < fec_k)  return;
 
-    fec_encode(fec_p, (const uint8_t**)block, block + fec_k, max_packet_size);
+
+
+    // fec 4000 bytes (4 blocks, 1000bytes per block) ~= 900 us
+    TEST_TIME_FUNC(fec_encode(fec_p, (const uint8_t**)block, block + fec_k, max_packet_size),FEC);
     while (fragment_idx < fec_n)
     {
         send_block_fragment(max_packet_size);

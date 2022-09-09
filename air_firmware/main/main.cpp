@@ -38,8 +38,87 @@
 #include "crc.h"
 #include "circular_buffer.h"
 
+typedef struct{
+    size_t size;
+}PipelineData;
 
-Transmitter transmitter(8,12,0);
+class Buffer{
+    public:
+
+    void clear(){
+        ptr=buf;
+        available_length=max_size; 
+    }
+
+
+    Buffer(size_t size){
+        buf =(uint8_t *) malloc(size);
+
+        max_size=size;
+        clear();
+        mux= xSemaphoreCreateBinary();
+    }
+
+    ~Buffer(){
+        free(buf);
+    }
+    uint8_t * write(uint8_t * data, size_t len){
+        if(available_length<len){
+            return nullptr;
+        }
+        xSemaphoreTake(mux, portMAX_DELAY);
+
+        memcpy(ptr,data,len);
+        ptr+=len;
+        available_length-=len;
+
+        xSemaphoreGive(mux);
+        return ptr;
+    }
+
+    bool read_out(uint8_t * target,size_t len){
+        if(ptr-len<buf){
+            return false;
+        }
+        xSemaphoreTake(mux, portMAX_DELAY);
+
+        ptr-=len;
+        memcpy(target,ptr,len);
+        available_length+=len;
+
+        xSemaphoreGive(mux);
+        return true;
+    }
+
+    void start_operate(){
+        xSemaphoreTake(mux, portMAX_DELAY); 
+    }
+
+    void stop_operate(){
+        xSemaphoreGive(mux);
+    }
+
+    bool read_operate(uint8_t len, void (*callback)(const void* data, size_t count)){
+        if(ptr-len<buf){
+            return false;
+        }
+        
+    }
+
+
+    private:
+    uint8_t * buf;
+    size_t max_size;
+    size_t available_length;
+    uint8_t * ptr;
+    SemaphoreHandle_t mux;
+};
+
+Buffer * pipeline_buffer;
+QueueHandle_t cam2fec_pipeline_queue;
+
+
+Transmitter transmitter(4,6,0);
 
 
 //#define WIFI_AP
@@ -173,10 +252,12 @@ static TaskHandle_t s_wifi_rx_task = nullptr;
 
 static size_t s_video_frame_data_size = 0;
 static bool s_video_frame_started = false;
+static buffer_ready=true;
 
 static int64_t s_video_last_sent_tp = esp_timer_get_time();
 static int64_t s_video_last_acquired_tp = esp_timer_get_time();
 static bool s_video_skip_frame = false;
+static bool s_video_frame_end = false;
 static int64_t s_video_target_frame_dt = 0;
 
 /////////////////////////////////////////////////////////////////////////
@@ -766,7 +847,7 @@ void setup_wifi()
     //esp_log_level_set("*", ESP_LOG_DEBUG);
 
     LOG("MEMORY After WIFI: \n");
-    heap_caps_print_heap_info(MALLOC_CAP_8BIT);
+    (MALLOC_CAP_8BIT);
 
     LOG("Initialized\n");
 }
@@ -781,6 +862,9 @@ IRAM_ATTR void send_air2ground_video_packet(uint8_t * buf)
 constexpr size_t PAYLOAD_SIZE = AIR2GROUND_MTU - sizeof(Air2Ground_Video_Packet);
 
 uint8_t CAMERA_BUFFER[2000];
+
+uint64_t last_cap_time,cap_dts;
+uint32_t cam_count;
 
 IRAM_ATTR static void camera_data_available(const void* data, size_t stride, size_t count, bool last)
 {
@@ -836,9 +920,25 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
             {
                 *ptr++ = *src; src += stride;
             }
-            transmitter.send_packet(CAMERA_BUFFER,count,0);
+            //transmitter.send_packet(CAMERA_BUFFER,count,0);
             if (s_ground2air_config_packet.dvr_record)
                 add_to_sd_fast_buffer(start_ptr, c);
+            cap_dts=micros()-last_cap_time;
+            cam_count=count;
+            last_cap_time=micros();
+            
+            if(buffer_ready && s_video_frame_started){
+                pipeline_buffer->write(CAMERA_BUFFER,count);
+            }
+
+            if(last){
+                s_video_frame_end=true;
+                buffer_ready=false;
+            }
+            //PipelineData temp_pipeline_item={count};
+            //xQueueSendToBack(cam2fec_pipeline_queue,&temp_pipeline_item,portMAX_DELAY);
+            //give  Notify to fec
+
         }
     }
 
@@ -943,33 +1043,13 @@ static void print_cpu_usage()
 }
 
 
-// uint8_t data[1000]={1,2,4,5,15,5,5,5,5,5,50};
-// uint8_t outdata[1444]={0};
-// extern "C" void app_main()
-// {
-
-
-//     uint64_t outsize;
-//     uint64_t cnt=0;
-//     uint8_t key[32]={1,2,3,4,56,6};
-//     srand(esp_timer_get_time());
-
-//     printf("Initializing...\n");
-    
-//     while (true)
-//     {
-//         esp_task_wdt_reset();
-//         uint64_t t1=micros();
-//         crypto_aead_chacha20poly1305_encrypt(outdata,&outsize,data,sizeof(data),NULL,0,NULL,(uint8_t *)&cnt,key);
-//         uint64_t t2=micros();
-//         cnt++;
-//         printf("encrypt time=%lld outsize:%lld \n",t2-t1,outsize); 
-//         vTaskDelay(10);
-        
-//     }
-// }
-
-
+void fec_proc(void *){
+    while(true){
+        //ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS); //wait for notification
+        PipelineData temp;
+        xQueueReceive(cam2fec_pipeline_queue,&temp,portMAX_DELAY);
+    }
+}
 
 extern "C" void app_main()
 {
@@ -988,7 +1068,9 @@ extern "C" void app_main()
 
     printf("MEMORY at start: \n");
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
+    cam2fec_pipeline_queue = xQueueCreate(30, sizeof(PipelineData));
 
+    pipeline_buffer = new Buffer(8192);
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -998,7 +1080,7 @@ extern "C" void app_main()
     }
     ESP_ERROR_CHECK(ret);
 
-    init_queues(WLAN_INCOMING_BUFFER_SIZE, WLAN_OUTGOING_BUFFER_SIZE);
+    //init_queues(WLAN_INCOMING_BUFFER_SIZE, WLAN_OUTGOING_BUFFER_SIZE);
     setup_wifi();
     init_camera();
 
@@ -1016,9 +1098,12 @@ extern "C" void app_main()
     }
     esp_camera_fb_get(); //this will start the camera capture
 
+
+
     printf("MEMORY Before Loop: \n");
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
-
+    LOG("interface :%d   %d \n",WIFI_IF_STA,ESP_WIFI_IF);
+    uint64_t t1,t2;
     while (true)
     {
         if (s_uart_verbose > 0 && millis() - s_stats_last_tp >= 1000)
@@ -1029,6 +1114,13 @@ extern "C" void app_main()
             //    (int)s_stats.video_frames, s_stats.video_data, s_stats.sd_data, s_stats.sd_drops);
             print_cpu_usage();
 
+            if(s_video_frame_end){
+                pipeline_buffer->read_out()
+            }
+            transmitter.send_packet(CAMERA_BUFFER,1600,0);
+
+            transmitter.send_session_key();
+            //esp_wifi_80211_tx(ESP_WIFI_IF, CAMERA_BUFFER, 500, false);
             s_stats = Stats();
         }
 
