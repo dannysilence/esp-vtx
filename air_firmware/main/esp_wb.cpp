@@ -133,6 +133,8 @@ void Transmitter::send_block_fragment(size_t packet_size)
     block_hdr->packet_type = WFB_PACKET_DATA;
     block_hdr->nonce = htobe64(((block_idx & BLOCK_IDX_MASK) << 8) + fragment_idx);
 
+    LOG("block_idx:%lld   fragment_idx:%d\n",block_idx,fragment_idx);
+
     // encrypted payload
     // encrypt 1000 bytes ~= 400 us
     TEST_TIME_FUNC(crypto_aead_chacha20poly1305_encrypt(ciphertext + sizeof(wblock_hdr_t), &ciphertext_len,
@@ -192,6 +194,7 @@ void Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
     block_idx += 1;
     fragment_idx = 0;
     max_packet_size = 0;
+
 
     // Generate new session key after MAX_BLOCK_IDX blocks
     if (block_idx > MAX_BLOCK_IDX)

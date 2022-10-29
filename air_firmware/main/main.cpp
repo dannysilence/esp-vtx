@@ -46,79 +46,73 @@ class Buffer{
     public:
 
     void clear(){
-        ptr=buf;
+        read_ptr=buf;
+        write_ptr=buf;
         available_length=max_size; 
     }
 
 
     Buffer(size_t size){
         buf =(uint8_t *) malloc(size);
-
         max_size=size;
         clear();
-        mux= xSemaphoreCreateBinary();
+        write_mux = xSemaphoreCreateBinary();
+        read_mux = xSemaphoreCreateBinary();
     }
 
     ~Buffer(){
         free(buf);
     }
-    uint8_t * write(uint8_t * data, size_t len){
-        if(available_length<len){
-            return nullptr;
+    void write(uint8_t * data, size_t len){
+        xSemaphoreTake(write_mux, portMAX_DELAY);
+
+        uint8_t * old_ptr=write_ptr;
+        if(len>available_length){
+            uint32_t wrap_cnt=len-available_length;
+            write_ptr=buf+wrap_cnt;
+            xSemaphoreGive(write_mux);
+            memcpy(old_ptr,data,available_length);
+            memcpy(buf,data+available_length,wrap_cnt);
+            available_length=max_size-wrap_cnt;
+        }else{
+            write_ptr+=len;
+            xSemaphoreGive(write_mux);
+            memcpy(old_ptr,data,len);
+            available_length-=len;
         }
-        xSemaphoreTake(mux, portMAX_DELAY);
-
-        memcpy(ptr,data,len);
-        ptr+=len;
-        available_length-=len;
-
-        xSemaphoreGive(mux);
-        return ptr;
     }
 
-    bool read_out(uint8_t * target,size_t len){
-        if(ptr-len<buf){
-            return false;
-        }
-        xSemaphoreTake(mux, portMAX_DELAY);
-
-        ptr-=len;
-        memcpy(target,ptr,len);
-        available_length+=len;
-
-        xSemaphoreGive(mux);
-        return true;
-    }
-
-    void start_operate(){
-        xSemaphoreTake(mux, portMAX_DELAY); 
-    }
-
-    void stop_operate(){
-        xSemaphoreGive(mux);
-    }
-
-    bool read_operate(uint8_t len, void (*callback)(const void* data, size_t count)){
-        if(ptr-len<buf){
-            return false;
-        }
+    void read_out(uint8_t * target,size_t len){
         
+        xSemaphoreTake(read_mux, portMAX_DELAY);
+        uint8_t * old_ptr=read_ptr;
+        if(read_ptr+len>buf+max_size){
+            uint32_t first_cnt=buf+max_size-read_ptr;
+            read_ptr=buf+first_cnt;
+            xSemaphoreGive(read_mux);
+            memcpy(target,old_ptr,first_cnt);
+            memcpy(target+first_cnt,buf,len-first_cnt);
+        }else{
+            read_ptr+=len;
+            xSemaphoreGive(read_mux);
+            memcpy(target,old_ptr,len);
+        }
     }
-
 
     private:
     uint8_t * buf;
     size_t max_size;
     size_t available_length;
-    uint8_t * ptr;
-    SemaphoreHandle_t mux;
+    uint8_t * write_ptr;
+    uint8_t * read_ptr;
+    SemaphoreHandle_t write_mux,read_mux;
+    
 };
 
-Buffer * pipeline_buffer;
 QueueHandle_t cam2fec_pipeline_queue;
 
 
-Transmitter transmitter(4,6,0);
+Transmitter transmitter(8,12,0);
 
 
 //#define WIFI_AP
@@ -252,12 +246,11 @@ static TaskHandle_t s_wifi_rx_task = nullptr;
 
 static size_t s_video_frame_data_size = 0;
 static bool s_video_frame_started = false;
-static buffer_ready=true;
+static bool buffer_ready=true;
 
 static int64_t s_video_last_sent_tp = esp_timer_get_time();
 static int64_t s_video_last_acquired_tp = esp_timer_get_time();
 static bool s_video_skip_frame = false;
-static bool s_video_frame_end = false;
 static int64_t s_video_target_frame_dt = 0;
 
 /////////////////////////////////////////////////////////////////////////
@@ -463,254 +456,8 @@ Circular_Buffer s_sd_slow_buffer((uint8_t*)heap_caps_malloc(SD_SLOW_BUFFER_SIZE,
 // this RAM block and write from it directly. This results in several MB/s write speed performance which is good enough.
 static constexpr size_t SD_WRITE_BLOCK_SIZE = 8192;
 
-static void shutdown_sd()
-{
-    if (!s_sd_initialized)
-        return;
-
-    esp_vfs_fat_sdmmc_unmount();
-    s_sd_initialized = false;
-
-    //to turn the LED off
-    gpio_set_pull_mode((gpio_num_t)4, GPIO_PULLDOWN_ONLY);    // D1, needed in 4-line mode only
-}
-
-static bool init_sd()
-{
-    if (s_sd_initialized)
-        return true;
-
-    sdmmc_card_t* card = nullptr;
-
-    esp_vfs_fat_sdmmc_mount_config_t mount_config;
-    mount_config.format_if_mount_failed = false;
-    mount_config.max_files = 2;
-    mount_config.allocation_unit_size = 0;
-
-#if 0
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-
-    if (!s_spi_initialized)
-        s_spi_initialized = init_spi((spi_host_device_t)host.slot);
-
-    gpio_set_pull_mode((gpio_num_t)15, GPIO_PULLUP_ONLY);   // CMD, needed in 4- and 1- line modes
-    gpio_set_pull_mode((gpio_num_t)13, GPIO_PULLUP_ONLY);   // D3, needed in 4- and 1-line modes
-
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = GPIO_NUM_13;
-    slot_config.host_id = (spi_host_device_t)host.slot;
-
-    esp_err_t ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config, &mount_config, &card);
-    if (ret != ESP_OK)
-    {
-        LOG("Failed to mount SD card VFAT filesystem. Error: %s\n", esp_err_to_name(ret));
-        return false;
-    }
-#else
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    //host.max_freq_khz = SDMMC_FREQ_PROBING;
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-    //host.flags = SDMMC_HOST_FLAG_1BIT;
-
-    gpio_set_pull_mode((gpio_num_t)14, GPIO_PULLUP_ONLY);   // CLK, needed in 4-line mode only
-    gpio_set_pull_mode((gpio_num_t)15, GPIO_PULLUP_ONLY);   // CMD, needed in 4- and 1- line modes
-    gpio_set_pull_mode((gpio_num_t)2, GPIO_PULLUP_ONLY);    // D0, needed in 4-line mode only
-    gpio_set_pull_mode((gpio_num_t)4, GPIO_PULLUP_ONLY);    // D1, needed in 4-line mode only
-    gpio_set_pull_mode((gpio_num_t)12, GPIO_PULLUP_ONLY);   // D2, needed in 4-line mode only
-    gpio_set_pull_mode((gpio_num_t)13, GPIO_PULLUP_ONLY);   // D3, needed in 4- and 1-line modes
-
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    //slot_config.width = 1;
-
-    LOG("Mounting SD card...\n");
-    esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
-    if (ret != ESP_OK)
-    {
-        LOG("Failed to mount SD card VFAT filesystem. Error: %s\n", esp_err_to_name(ret));
-        //to turn the LED off
-        gpio_set_pull_mode((gpio_num_t)4, GPIO_PULLDOWN_ONLY);    // D1, needed in 4-line mode only
-        return false;
-    }
-#endif
-
-    s_sd_initialized = true;
-
-    //find the latest file number
-    char buffer[64];
-    for (uint32_t i = 0; i < 100000; i++)
-    {
-        sprintf(buffer, "/sdcard/session%03d_segment000.mjpeg", i);
-        FILE* f = fopen(buffer, "rb");
-        if (f)
-        {
-            fclose(f);
-            continue;
-        }
-        s_sd_next_session_id = i;
-        s_sd_next_segment_id = 0;
-        break;
-    }
-    return true;
-}
-
-static FILE* open_sd_file()
-{
-    char buffer[64];
-    sprintf(buffer, "/sdcard/session%03d_segment%03d.mjpeg", s_sd_next_session_id, s_sd_next_segment_id);
-    FILE* f = fopen(buffer, "wb");
-    if (!f)
-        return nullptr;
-
-    LOG("Opening session file '%s'\n", buffer);
-    s_sd_file_size = 0;
-    s_sd_next_segment_id++;
-
-    return f;
-}
-
-//this will write data from the slow queue to file
-static void sd_write_proc(void*)
-{
-    uint8_t* block = new uint8_t[SD_WRITE_BLOCK_SIZE];
-
-    while (true)
-    {
-        if (!s_ground2air_config_packet.dvr_record)
-        {
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            continue;
-        }
-
-        if (!init_sd())
-        {
-            vTaskDelay(3000 / portTICK_PERIOD_MS);
-            continue;
-        }
-
-        FILE* f = open_sd_file();
-        if (!f)
-        {
-            shutdown_sd();
-            vTaskDelay(1000 / portTICK_PERIOD_MS); 
-            continue;
-        }
-
-        xSemaphoreTake(s_sd_slow_buffer_mux, portMAX_DELAY);
-        s_sd_slow_buffer.clear();
-        xSemaphoreGive(s_sd_slow_buffer_mux);
-
-        bool error = false; 
-        bool done = false;
-        while (!done)
-        {
-            ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS); //wait for notification
-
-            while (true) //consume all the buffer
-            {
-                if (!s_ground2air_config_packet.dvr_record)
-                {
-                    LOG("Done recording, closing file\n", s_sd_file_size);
-                    done = true;
-                    break;
-                }
-
-                xSemaphoreTake(s_sd_slow_buffer_mux, portMAX_DELAY);
-                bool read = s_sd_slow_buffer.read(block, SD_WRITE_BLOCK_SIZE);
-                xSemaphoreGive(s_sd_slow_buffer_mux);
-                if (!read)
-                    break; //not enough data, wait
-
-                if (fwrite(block, SD_WRITE_BLOCK_SIZE, 1, f) == 0)
-                {
-                    LOG("Error while writing! Stopping session\n");
-                    done = true;
-                    error = true;
-                    break;
-                }
-                s_stats.sd_data += SD_WRITE_BLOCK_SIZE;
-                s_sd_file_size += SD_WRITE_BLOCK_SIZE;
-                if (s_sd_file_size > 500 * 1024 * 1024)
-                {
-                    LOG("Max file size reached: %d. Restarting session\n", s_sd_file_size);
-                    done = true;
-                    break;
-                }
-            }
-        }
-
-        if (!error)
-        {
-            fflush(f);
-            fsync(fileno(f));
-            fclose(f);
-        }
-
-        if (!s_ground2air_config_packet.dvr_record || error)
-            shutdown_sd();
-    }
-}
-
-//this will move data from the fast queue to the slow queue
-static void sd_enqueue_proc(void*)
-{
-    while (true)
-    {
-        if (!s_ground2air_config_packet.dvr_record)
-        {
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            continue;
-        }
-
-        xSemaphoreTake(s_sd_fast_buffer_mux, portMAX_DELAY);
-        s_sd_fast_buffer.clear();
-        xSemaphoreGive(s_sd_fast_buffer_mux);
-
-        while (true)
-        {
-            ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS); //wait for notification
-
-            xSemaphoreTake(s_sd_fast_buffer_mux, portMAX_DELAY);
-            size_t size = s_sd_fast_buffer.size();
-            if (size == 0)
-            {
-                xSemaphoreGive(s_sd_fast_buffer_mux);
-                continue; //no data? wait some more
-            }
-
-            const void* buffer = s_sd_fast_buffer.start_reading(size);
-            xSemaphoreGive(s_sd_fast_buffer_mux);
-
-            xSemaphoreTake(s_sd_slow_buffer_mux, portMAX_DELAY);
-            s_sd_slow_buffer.write(buffer, size);
-            xSemaphoreGive(s_sd_slow_buffer_mux);
-
-            xSemaphoreTake(s_sd_fast_buffer_mux, portMAX_DELAY);
-            s_sd_fast_buffer.end_reading(size);
-            xSemaphoreGive(s_sd_fast_buffer_mux);
-
-            if (s_sd_write_task)
-                xTaskNotifyGive(s_sd_write_task); //notify task
-
-            if (!s_ground2air_config_packet.dvr_record)
-                break;
-        }
-    }
-}
-
-
-IRAM_ATTR static void add_to_sd_fast_buffer(const void* data, size_t size)
-{
-    xSemaphoreTake(s_sd_fast_buffer_mux, portMAX_DELAY);
-    bool ok = s_sd_fast_buffer.write(data, size);
-    xSemaphoreGive(s_sd_fast_buffer_mux);
-    if (ok)
-    {
-        if (s_sd_enqueue_task)
-            xTaskNotifyGive(s_sd_enqueue_task); //notify task
-    }
-    else
-        s_stats.sd_drops += size;
-}
+uint64_t last_cap_time,cap_dts;
+uint32_t cam_count;
 
 /////////////////////////////////////////////////////////////////////
 
@@ -829,7 +576,7 @@ void setup_wifi()
 #endif
 
     ESP_ERROR_CHECK(set_wifi_fixed_rate(s_ground2air_config_packet.wifi_rate));
-    ESP_ERROR_CHECK(esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE));
 
     wifi_promiscuous_filter_t filter = 
     {
@@ -847,7 +594,6 @@ void setup_wifi()
     //esp_log_level_set("*", ESP_LOG_DEBUG);
 
     LOG("MEMORY After WIFI: \n");
-    (MALLOC_CAP_8BIT);
 
     LOG("Initialized\n");
 }
@@ -862,14 +608,15 @@ IRAM_ATTR void send_air2ground_video_packet(uint8_t * buf)
 constexpr size_t PAYLOAD_SIZE = AIR2GROUND_MTU - sizeof(Air2Ground_Video_Packet);
 
 uint8_t CAMERA_BUFFER[2000];
+uint8_t Frame_buffer[8192];
 
-uint64_t last_cap_time,cap_dts;
-uint32_t cam_count;
+
 
 IRAM_ATTR static void camera_data_available(const void* data, size_t stride, size_t count, bool last)
 {
 
-    if (data == nullptr) //start frame
+    static uint32_t frame_bytes_cnt=0;
+    if (data == nullptr && buffer_ready) //start frame
     {
         s_video_frame_started = true;        
     }
@@ -902,8 +649,6 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
             uint8_t* ptr = start_ptr;
             size_t c = count;
 
-            s_video_frame_data_size += c;
-
             size_t c8 = c >> 3;
             for (size_t i = c8; i > 0; i--)
             {
@@ -920,20 +665,22 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
             {
                 *ptr++ = *src; src += stride;
             }
-            //transmitter.send_packet(CAMERA_BUFFER,count,0);
-            if (s_ground2air_config_packet.dvr_record)
-                add_to_sd_fast_buffer(start_ptr, c);
-            cap_dts=micros()-last_cap_time;
-            cam_count=count;
-            last_cap_time=micros();
+
+
             
-            if(buffer_ready && s_video_frame_started){
-                pipeline_buffer->write(CAMERA_BUFFER,count);
+            if(s_video_frame_started){
+                memcpy(Frame_buffer+frame_bytes_cnt,CAMERA_BUFFER,count);
+                frame_bytes_cnt += count;
             }
 
-            if(last){
-                s_video_frame_end=true;
+            if(last && s_video_frame_started){
                 buffer_ready=false;
+                s_video_frame_data_size=frame_bytes_cnt;
+                frame_bytes_cnt=0;
+
+                cap_dts=micros()-last_cap_time;
+                last_cap_time=micros();
+                s_video_frame_started=false;
             }
             //PipelineData temp_pipeline_item={count};
             //xQueueSendToBack(cam2fec_pipeline_queue,&temp_pipeline_item,portMAX_DELAY);
@@ -967,7 +714,7 @@ static void init_camera()
     config.pin_reset = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size = FRAMESIZE_VGA;
+    config.frame_size = FRAMESIZE_HQVGA;
     config.jpeg_quality = 4;
     config.fb_count = 3;
 
@@ -980,7 +727,7 @@ static void init_camera()
     }
 
     sensor_t *s = esp_camera_sensor_get();
-    s->set_framesize(s, FRAMESIZE_VGA);
+    s->set_framesize(s, FRAMESIZE_HQVGA);
     s->set_saturation(s, 0);
 }
 
@@ -1051,6 +798,59 @@ void fec_proc(void *){
     }
 }
 
+#include "driver/uart.h"
+#include "soc/uart_periph.h"
+#include "esp_rom_gpio.h"
+#include "driver/gpio.h"
+uint8_t one_frame_buffer[8192]={0};
+uint8_t final_buffer[8192]={0};
+
+#define DEFAULT_UART_CHANNEL    (0)
+#define DEFAULT_UART_RX_PIN     (GPIO_NUM_3)
+#define DEFAULT_UART_TX_PIN     (GPIO_NUM_1)
+
+#define UARTS_BAUD_RATE         (115200)
+#define TASK_STACK_SIZE         (2048)
+#define READ_BUF_SIZE           (1024)
+
+
+static void configure_uarts(void)
+{
+    /* Configure parameters of an UART driver,
+     * communication pins and install the driver */
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
+    };
+
+    ESP_ERROR_CHECK(uart_driver_install(DEFAULT_UART_CHANNEL, READ_BUF_SIZE * 2, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(DEFAULT_UART_CHANNEL, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(DEFAULT_UART_CHANNEL, DEFAULT_UART_TX_PIN, DEFAULT_UART_RX_PIN,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+}
+
+
+void construct_test_package(uint8_t * buff,int len){
+    int *p=(int * )buff;
+    for(int i=0;i<len/4;++i){
+        *p=i;
+        ++p;
+    }
+}
+void construct_test_package2(uint8_t * buff,int len){
+    uint8_t data=0;
+    for(int i=0;i<len;++i){
+        buff[i]=data;
+        data++;
+    }
+}
+
+#define TEST_CORRECT
+#undef TEST_CORRECT
 extern "C" void app_main()
 {
     Ground2Air_Data_Packet& ground2air_data_packet = s_ground2air_data_packet;
@@ -1060,9 +860,13 @@ extern "C" void app_main()
     Ground2Air_Config_Packet& ground2air_config_packet = s_ground2air_config_packet;
     ground2air_config_packet.type = Ground2Air_Header::Type::Config;
     ground2air_config_packet.size = sizeof(ground2air_config_packet);
-    ground2air_config_packet.wifi_rate = WIFI_Rate::RATE_G_18M_ODFM;
+    ground2air_config_packet.wifi_rate = WIFI_Rate::RATE_G_6M_ODFM;
+
+    static uint8_t temp_buffer[1024];
 
     srand(esp_timer_get_time());
+    //configure_uarts();
+    
 
     printf("Initializing...\n");
 
@@ -1070,7 +874,6 @@ extern "C" void app_main()
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
     cam2fec_pipeline_queue = xQueueCreate(30, sizeof(PipelineData));
 
-    pipeline_buffer = new Buffer(8192);
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1084,49 +887,94 @@ extern "C" void app_main()
     setup_wifi();
     init_camera();
 
-    {
-        int core = tskNO_AFFINITY;
-        BaseType_t res = xTaskCreatePinnedToCore(&sd_write_proc, "SD Write", 4096, nullptr, 1, &s_sd_write_task, core);
-        if (res != pdPASS)
-            LOG("Failed sd write task: %d\n", res);
-    }
-    {
-        int core = tskNO_AFFINITY;
-        BaseType_t res = xTaskCreatePinnedToCore(&sd_enqueue_proc, "SD Enq", 1024, nullptr, 1, &s_sd_enqueue_task, core);
-        if (res != pdPASS)
-            LOG("Failed sd enqueue task: %d\n", res);
-    }
+
     esp_camera_fb_get(); //this will start the camera capture
 
 
 
     printf("MEMORY Before Loop: \n");
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
-    LOG("interface :%d   %d \n",WIFI_IF_STA,ESP_WIFI_IF);
-    uint64_t t1,t2;
+    uart_driver_install(DEFAULT_UART_CHANNEL, READ_BUF_SIZE * 2, 0, 0, NULL, 0);
     while (true)
     {
-        if (s_uart_verbose > 0 && millis() - s_stats_last_tp >= 1000)
-        {
-            s_stats_last_tp = millis();
-            //LOG("WLAN S: %d, R: %d, E: %d, D: %d, %%: %d || FPS: %d, D: %d || D: %d, E: %d\n",
-            //    s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_wlan_outgoing_queue.size() * 100 / s_wlan_outgoing_queue.capacity(),
-            //    (int)s_stats.video_frames, s_stats.video_data, s_stats.sd_data, s_stats.sd_drops);
-            print_cpu_usage();
-
-            if(s_video_frame_end){
-                pipeline_buffer->read_out()
-            }
-            transmitter.send_packet(CAMERA_BUFFER,1600,0);
-
-            transmitter.send_session_key();
-            //esp_wifi_80211_tx(ESP_WIFI_IF, CAMERA_BUFFER, 500, false);
-            s_stats = Stats();
-        }
-
-        vTaskDelay(10);
+        static int cnt=0;
+        static size_t now_size=0;
+        static int len=0;
+        static uint8_t data[8];
         esp_task_wdt_reset();
 
-        update_status_led();
+        vTaskDelay(10);
+
+        do {
+            len = uart_read_bytes(0, data,  1, 100 / portTICK_RATE_MS);
+        } while (len == 0);
+
+        #ifndef TEST_CORRECT
+        if(!buffer_ready){
+            now_size=s_video_frame_data_size;
+            memcpy(one_frame_buffer,Frame_buffer,s_video_frame_data_size);
+            buffer_ready=true;
+            cnt++;
+            transmitter.send_session_key();
+        }
+        #else
+            construct_test_package2(one_frame_buffer,5000);
+            now_size=5000;
+        #endif
+
+        size_t one_cycle_size=now_size/8;
+
+
+        for(int i=0;i<8;++i){
+            //temp_buffer[0]=(uint8_t )i;
+            if(i==7){
+                transmitter.send_session_key();
+                //memcpy(temp_buffer+1,one_frame_buffer+i*one_cycle_size,now_size-i*one_cycle_size);
+                transmitter.send_packet(one_frame_buffer+i*one_cycle_size,now_size-i*one_cycle_size,0);
+                //transmitter.send_packet(temp_buffer,now_size-i*one_cycle_size+1,0);
+                LOG("send size:%d, cnt:%d\n",now_size-i*one_cycle_size,i);
+            }else{
+                //memcpy(temp_buffer+1,one_frame_buffer+i*one_cycle_size,one_cycle_size);
+                //transmitter.send_packet(temp_buffer,one_cycle_size+1,0);
+                transmitter.send_packet(one_frame_buffer+i*one_cycle_size,one_cycle_size,0);
+                LOG("send size:%d, cnt:%d\n",one_cycle_size,i);
+            }
+            //vTaskDelay(100);
+        }
+
+        // do {
+        //     len = uart_read_bytes(0, data,  1, 250 / portTICK_RATE_MS);
+        // } while (len == 0);
+        // vTaskDelay(100);
+        // uart_write_bytes(0,&now_size,sizeof(size_t));
+        // vTaskDelay(100);
+        // uart_write_bytes(0,one_frame_buffer,now_size);
+        // continue;
+        
+
+        
+
+        
+        // if (s_uart_verbose > 0 && millis() - s_stats_last_tp >= 1000)
+        // {
+        //     s_stats_last_tp = millis();
+        //     //LOG("WLAN S: %d, R: %d, E: %d, D: %d, %%: %d || FPS: %d, D: %d || D: %d, E: %d\n",
+        //     //    s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_wlan_outgoing_queue.size() * 100 / s_wlan_outgoing_queue.capacity(),
+        //     //    (int)s_stats.video_frames, s_stats.video_data, s_stats.sd_data, s_stats.sd_drops);
+        //     print_cpu_usage();
+
+        //     if(s_video_frame_end){
+        //         pipeline_buffer->read_out(CAMERA_BUFFER,);
+        //     }
+        //     transmitter.send_packet(CAMERA_BUFFER,1600,0);
+
+        //     transmitter.send_session_key();
+        //     //esp_wifi_80211_tx(ESP_WIFI_IF, CAMERA_BUFFER, 500, false);
+        //     s_stats = Stats();
+        // }
+
+        // vTaskDelay(10);
+        
+
     }
 }
