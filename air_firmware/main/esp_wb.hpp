@@ -14,6 +14,7 @@ public:
     virtual ~Transmitter();
     void send_packet(const uint8_t *buf, size_t size, uint8_t flags);
     void send_session_key(void);
+    uint8_t * push(size_t size);
 protected:
     void inject_packet(const uint8_t *buf, size_t size);
 
@@ -26,6 +27,7 @@ private:
     int fec_n;  // RS total number of fragments in block
     uint64_t block_idx; //block_idx << 8 + fragment_idx = nonce (64bit)
     uint8_t fragment_idx;
+    uint8_t push_fragment_idx; 
     uint8_t** block;
     size_t max_packet_size;
     uint8_t radio_port;

@@ -156,6 +156,23 @@ void Transmitter::send_session_key(void)
     inject_packet((uint8_t*)&session_key_packet, sizeof(session_key_packet));
 }
 
+uint8_t * Transmitter::push(size_t size){
+    wpacket_hdr_t packet_hdr;
+
+    if(push_fragment_idx >= fec_n){
+        return ;
+    }
+    packet_hdr.packet_size = htobe16(size);
+
+    memset(block[push_fragment_idx], 0, MAX_FEC_PAYLOAD);
+    memcpy(block[push_fragment_idx], &packet_hdr, sizeof(packet_hdr));
+    //memcpy(block[push_fragment_idx] + sizeof(packet_hdr), buf, size);
+
+    //push_fragment_idx++; 
+    return &block[push_fragment_idx++];
+}
+
+
 void Transmitter::send_packet(const uint8_t *buf, size_t size, uint8_t flags)
 {
     wpacket_hdr_t packet_hdr;

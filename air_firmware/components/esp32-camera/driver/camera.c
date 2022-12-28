@@ -455,6 +455,8 @@ static void IRAM_ATTR i2s_start_bus()
 
     esp_intr_enable(s_state->i2s_intr_handle);
     I2S0.conf.rx_start = 1;
+
+    ESP_LOGI(TAG,"RX_EOF_NUM:%d\n",s_state->dma_sample_count);
     if (s_state->config.pixel_format == PIXFORMAT_JPEG) {
         vsync_intr_enable();
     }

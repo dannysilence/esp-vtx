@@ -37,6 +37,7 @@
 #include "structures.h"
 #include "crc.h"
 #include "circular_buffer.h"
+#include "pin.h"
 
 typedef struct{
     size_t size;
@@ -126,109 +127,6 @@ Transmitter transmitter(8,12,0);
 #endif
 
 
-
-/*Select Camera Model*/
-#define CAMERA_MODEL_AI_THINKER
-
-#if defined(CAMERA_MODEL_WROVER_KIT)
-#define PWDN_GPIO_NUM    -1
-#define RESET_GPIO_NUM   -1
-#define XCLK_GPIO_NUM    21
-#define SIOD_GPIO_NUM    26
-#define SIOC_GPIO_NUM    27
-
-#define Y9_GPIO_NUM      35
-#define Y8_GPIO_NUM      34
-#define Y7_GPIO_NUM      39
-#define Y6_GPIO_NUM      36
-#define Y5_GPIO_NUM      19
-#define Y4_GPIO_NUM      18
-#define Y3_GPIO_NUM       5
-#define Y2_GPIO_NUM       4
-#define VSYNC_GPIO_NUM   25
-#define HREF_GPIO_NUM    23
-#define PCLK_GPIO_NUM    22
-
-#elif defined(CAMERA_MODEL_ESP_EYE)
-#define PWDN_GPIO_NUM    -1
-#define RESET_GPIO_NUM   -1
-#define XCLK_GPIO_NUM    4
-#define SIOD_GPIO_NUM    18
-#define SIOC_GPIO_NUM    23
-
-#define Y9_GPIO_NUM      36
-#define Y8_GPIO_NUM      37
-#define Y7_GPIO_NUM      38
-#define Y6_GPIO_NUM      39
-#define Y5_GPIO_NUM      35
-#define Y4_GPIO_NUM      14
-#define Y3_GPIO_NUM      13
-#define Y2_GPIO_NUM      34
-#define VSYNC_GPIO_NUM   5
-#define HREF_GPIO_NUM    27
-#define PCLK_GPIO_NUM    25
-
-#elif defined(CAMERA_MODEL_M5STACK_PSRAM)
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    15
-#define XCLK_GPIO_NUM     27
-#define SIOD_GPIO_NUM     25
-#define SIOC_GPIO_NUM     23
-
-#define Y9_GPIO_NUM       19
-#define Y8_GPIO_NUM       36
-#define Y7_GPIO_NUM       18
-#define Y6_GPIO_NUM       39
-#define Y5_GPIO_NUM        5
-#define Y4_GPIO_NUM       34
-#define Y3_GPIO_NUM       35
-#define Y2_GPIO_NUM       32
-#define VSYNC_GPIO_NUM    22
-#define HREF_GPIO_NUM     26
-#define PCLK_GPIO_NUM     21
-
-#elif defined(CAMERA_MODEL_AI_THINKER)
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
-
-#elif defined(CAMERA_MODEL_M5STACK)
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    15
-#define XCLK_GPIO_NUM     27
-#define SIOD_GPIO_NUM     25
-#define SIOC_GPIO_NUM     23
-
-#define Y9_GPIO_NUM       19
-#define Y8_GPIO_NUM       36
-#define Y7_GPIO_NUM       18
-#define Y6_GPIO_NUM       39
-#define Y5_GPIO_NUM        5
-#define Y4_GPIO_NUM       34
-#define Y3_GPIO_NUM       35
-#define Y2_GPIO_NUM       17
-#define VSYNC_GPIO_NUM    22
-#define HREF_GPIO_NUM     26
-#define PCLK_GPIO_NUM     21
-
-#else
-#error "Camera model not selected"
-#endif
-
 Stats s_stats;
 Ground2Air_Data_Packet s_ground2air_data_packet;
 Ground2Air_Config_Packet s_ground2air_config_packet;     
@@ -236,10 +134,6 @@ Ground2Air_Config_Packet s_ground2air_config_packet;
 static int s_stats_last_tp = -10000;
 
 static TaskHandle_t s_wifi_tx_task = nullptr;
-#ifdef TX_COMPLETION_CB
-SemaphoreHandle_t s_wifi_tx_done_semaphore = xSemaphoreCreateBinary();
-#endif
-
 static TaskHandle_t s_wifi_rx_task = nullptr;
 
 /////////////////////////////////////////////////////////////////////////
@@ -250,7 +144,6 @@ static bool buffer_ready=true;
 
 static int64_t s_video_last_sent_tp = esp_timer_get_time();
 static int64_t s_video_last_acquired_tp = esp_timer_get_time();
-static bool s_video_skip_frame = false;
 static int64_t s_video_target_frame_dt = 0;
 
 /////////////////////////////////////////////////////////////////////////
@@ -297,164 +190,6 @@ IRAM_ATTR void update_status_led()
     gpio_set_level(STATUS_LED_PIN, STATUS_LED_OFF);
 }
 
-//////////////////////////////////////////////////////////////////////////////
-
-Queue s_wlan_incoming_queue;
-Queue s_wlan_outgoing_queue;
-
-SemaphoreHandle_t s_wlan_incoming_mux = xSemaphoreCreateBinary();
-SemaphoreHandle_t s_wlan_outgoing_mux = xSemaphoreCreateBinary();
-SemaphoreHandle_t s_sd_fast_buffer_mux = xSemaphoreCreateBinary();
-SemaphoreHandle_t s_sd_slow_buffer_mux = xSemaphoreCreateBinary();
-
-auto _init_result = []() -> bool
-{
-  xSemaphoreGive(s_wlan_incoming_mux);
-  xSemaphoreGive(s_wlan_outgoing_mux);
-  xSemaphoreGive(s_sd_fast_buffer_mux);
-  xSemaphoreGive(s_sd_slow_buffer_mux);
-  return true;
-}();
-
-bool init_queues(size_t wlan_incoming_queue_size, size_t wlan_outgoing_queue_size)
-{
-  s_wlan_outgoing_queue.init(new uint8_t[wlan_outgoing_queue_size], wlan_outgoing_queue_size);
-  s_wlan_incoming_queue.init(new uint8_t[wlan_incoming_queue_size], wlan_incoming_queue_size);
-
-  return true;
-}
-
-////////////////////////////////////////////////////////////////////////////////////
-
-IRAM_ATTR bool start_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet, size_t size)
-{
-  size_t real_size = WLAN_IEEE_HEADER_SIZE + size;
-  uint8_t* buffer = s_wlan_outgoing_queue.start_writing(real_size);
-  if (!buffer)
-  {
-    packet.ptr = nullptr;
-    return false;
-  }
-  packet.offset = 0;
-  packet.size = size;
-  packet.ptr = buffer;
-  packet.payload_ptr = buffer + WLAN_IEEE_HEADER_SIZE;
-  return true;
-}
-IRAM_ATTR void end_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
-{
-  s_wlan_outgoing_queue.end_writing();
-  packet.ptr = nullptr;
-}
-IRAM_ATTR void cancel_writing_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
-{
-  s_wlan_outgoing_queue.cancel_writing();
-  packet.ptr = nullptr;
-}
-
-IRAM_ATTR bool start_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
-{
-  size_t real_size = 0;
-  uint8_t* buffer = s_wlan_outgoing_queue.start_reading(real_size);
-  if (!buffer)
-  {
-    packet.ptr = nullptr;
-    return false;
-  }
-  packet.offset = 0;
-  packet.size = real_size - WLAN_IEEE_HEADER_SIZE;
-  packet.ptr = buffer;
-  packet.payload_ptr = buffer + WLAN_IEEE_HEADER_SIZE;
-  return true;
-}
-IRAM_ATTR void end_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
-{
-  s_wlan_outgoing_queue.end_reading();
-  packet.ptr = nullptr;
-}
-IRAM_ATTR void cancel_reading_wlan_outgoing_packet(Wlan_Outgoing_Packet& packet)
-{
-  s_wlan_outgoing_queue.cancel_reading();
-  packet.ptr = nullptr;
-}
-
-////////////////////////////////////////////////////////////////////////////////////
-
-IRAM_ATTR bool start_writing_wlan_incoming_packet(Wlan_Incoming_Packet& packet, size_t size)
-{
-  uint8_t* buffer = s_wlan_incoming_queue.start_writing(size);
-  if (!buffer)
-  {
-    packet.ptr = nullptr;
-    return false;
-  }
-  packet.offset = 0;
-  packet.size = size;
-  packet.ptr = buffer;
-  return true;
-}
-IRAM_ATTR void end_writing_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
-{
-  s_wlan_incoming_queue.end_writing();
-  packet.ptr = nullptr;
-}
-IRAM_ATTR void cancel_writing_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
-{
-  s_wlan_incoming_queue.cancel_writing();
-  packet.ptr = nullptr;
-}
-
-IRAM_ATTR bool start_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
-{
-  size_t size = 0;
-  uint8_t* buffer = s_wlan_incoming_queue.start_reading(size);
-  if (!buffer)
-  {
-    packet.ptr = nullptr;
-    return false;
-  }
-  packet.offset = 0;
-  packet.size = size;
-  packet.ptr = buffer;
-  return true;
-}
-IRAM_ATTR void end_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
-{
-  s_wlan_incoming_queue.end_reading();
-  packet.ptr = nullptr;
-}
-IRAM_ATTR void cancel_reading_wlan_incoming_packet(Wlan_Incoming_Packet& packet)
-{
-  s_wlan_incoming_queue.cancel_reading();
-  packet.ptr = nullptr;
-}
-
-/////////////////////////////////////////////////////////////////////////
-
-
-/////////////////////////////////////////////////////////////////////////
-
-static TaskHandle_t s_sd_write_task = nullptr;
-static TaskHandle_t s_sd_enqueue_task = nullptr;
-static bool s_sd_initialized = false;
-static size_t s_sd_file_size = 0;
-static uint32_t s_sd_next_session_id = 0;
-static uint32_t s_sd_next_segment_id = 0;
-
-//the fast buffer is RAM and used to transfer data quickly from the camera callback to the slow, SPIRAM buffer. 
-//Writing directly to the SPIRAM buffer is too slow in the camera callback and causes lost frames, so I use this RAM buffer and a separate task (sd_enqueue_task) for that.
-static constexpr size_t SD_FAST_BUFFER_SIZE = 10000;
-Circular_Buffer s_sd_fast_buffer(new uint8_t[SD_FAST_BUFFER_SIZE], SD_FAST_BUFFER_SIZE);
-
-//this slow buffer is used to buffer data that is about to be written to SD. The reason it's this big is because SD card write speed fluctuated a lot and 
-// sometimes it pauses for a few hundred ms. So to avoid lost data, I have to buffer it into a big enoigh buffer.
-//The data is written to the sd card by the sd_write_task, in chunks of SD_WRITE_BLOCK_SIZE.
-static constexpr size_t SD_SLOW_BUFFER_SIZE = 3 * 1024 * 1024;
-Circular_Buffer s_sd_slow_buffer((uint8_t*)heap_caps_malloc(SD_SLOW_BUFFER_SIZE, MALLOC_CAP_SPIRAM), SD_SLOW_BUFFER_SIZE);
-
-//Cannot write to SD directly from the slow, SPIRAM buffer as that causes the write speed to plummet. So instead I read from the slow buffer into
-// this RAM block and write from it directly. This results in several MB/s write speed performance which is good enough.
-static constexpr size_t SD_WRITE_BLOCK_SIZE = 8192;
 
 uint64_t last_cap_time,cap_dts;
 uint32_t cam_count;
@@ -537,18 +272,6 @@ IRAM_ATTR void packet_received_cb(void* buf, wifi_promiscuous_pkt_type_t type)
 }
 
 
-
-////////////////////////////////////////////////////////////////////////
-
-#ifdef TX_COMPLETION_CB
-IRAM_ATTR static void wifi_tx_done(uint8_t ifidx, uint8_t *data, uint16_t *data_len, bool txStatus)
-{
-    //LOG("tx done\n");
-    xSemaphoreGive(s_wifi_tx_done_semaphore);
-}
-#endif
-
-
 void setup_wifi()
 {
     init_crc8_table();
@@ -570,11 +293,6 @@ void setup_wifi()
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    //this reduces throughput for some reason
-#ifdef TX_COMPLETION_CB
-    ESP_ERROR_CHECK(esp_wifi_set_tx_done_cb(wifi_tx_done));
-#endif
-
     ESP_ERROR_CHECK(set_wifi_fixed_rate(s_ground2air_config_packet.wifi_rate));
     ESP_ERROR_CHECK(esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE));
 
@@ -591,26 +309,16 @@ void setup_wifi()
 
     set_wlan_power_dBm(20.f);
 
-    //esp_log_level_set("*", ESP_LOG_DEBUG);
+    esp_log_level_set("*", ESP_LOG_DEBUG);
 
     LOG("MEMORY After WIFI: \n");
 
     LOG("Initialized\n");
 }
 
-/////////////////////////////////////////////////////////////////////////
-
-IRAM_ATTR void send_air2ground_video_packet(uint8_t * buf)
-{
-    
-}
-
-constexpr size_t PAYLOAD_SIZE = AIR2GROUND_MTU - sizeof(Air2Ground_Video_Packet);
 
 uint8_t CAMERA_BUFFER[2000];
 uint8_t Frame_buffer[8192];
-
-
 
 IRAM_ATTR static void camera_data_available(const void* data, size_t stride, size_t count, bool last)
 {
@@ -622,8 +330,6 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
     }
     else 
     {
-        if (!s_video_skip_frame)
-        {
             const uint8_t* src = (const uint8_t*)data;
 
             if (last) //find the end marker for JPEG. Data after that can be discarded
@@ -644,33 +350,17 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
                 }
             }
 
-            uint8_t* packet_data = CAMERA_BUFFER;
-            uint8_t* start_ptr = packet_data;
-            uint8_t* ptr = start_ptr;
-            size_t c = count;
+            uint8_t* ptr=transmitter.push(count);
 
-            size_t c8 = c >> 3;
-            for (size_t i = c8; i > 0; i--)
-            {
-                *ptr++ = *src; src += stride;
-                *ptr++ = *src; src += stride;
-                *ptr++ = *src; src += stride;
-                *ptr++ = *src; src += stride;
-                *ptr++ = *src; src += stride;
-                *ptr++ = *src; src += stride;
-                *ptr++ = *src; src += stride;
+            for(int i=0; i<count; ++i){
                 *ptr++ = *src; src += stride;
             }
-            for (size_t i = c - (c8 << 3); i > 0; i--)
-            {
-                *ptr++ = *src; src += stride;
-            }
-
 
             
             if(s_video_frame_started){
                 memcpy(Frame_buffer+frame_bytes_cnt,CAMERA_BUFFER,count);
                 frame_bytes_cnt += count;
+                LOG("count:%ld\n",count);
             }
 
             if(last && s_video_frame_started){
@@ -682,11 +372,6 @@ IRAM_ATTR static void camera_data_available(const void* data, size_t stride, siz
                 last_cap_time=micros();
                 s_video_frame_started=false;
             }
-            //PipelineData temp_pipeline_item={count};
-            //xQueueSendToBack(cam2fec_pipeline_queue,&temp_pipeline_item,portMAX_DELAY);
-            //give  Notify to fec
-
-        }
     }
 
 }
@@ -727,7 +412,7 @@ static void init_camera()
     }
 
     sensor_t *s = esp_camera_sensor_get();
-    s->set_framesize(s, FRAMESIZE_HQVGA);
+    //s->set_framesize(s, FRAMESIZE_HQVGA);
     s->set_saturation(s, 0);
 }
 
@@ -789,14 +474,6 @@ static void print_cpu_usage()
 #endif
 }
 
-
-void fec_proc(void *){
-    while(true){
-        //ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS); //wait for notification
-        PipelineData temp;
-        xQueueReceive(cam2fec_pipeline_queue,&temp,portMAX_DELAY);
-    }
-}
 
 #include "driver/uart.h"
 #include "soc/uart_periph.h"
@@ -883,14 +560,11 @@ extern "C" void app_main()
     }
     ESP_ERROR_CHECK(ret);
 
-    //init_queues(WLAN_INCOMING_BUFFER_SIZE, WLAN_OUTGOING_BUFFER_SIZE);
     setup_wifi();
     init_camera();
 
 
     esp_camera_fb_get(); //this will start the camera capture
-
-
 
     printf("MEMORY Before Loop: \n");
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
