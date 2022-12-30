@@ -39,83 +39,13 @@
 #include "circular_buffer.h"
 #include "pin.h"
 
-typedef struct{
-    size_t size;
-}PipelineData;
+Transmitter *transmitter=nullptr;
 
-class Buffer{
-    public:
-
-    void clear(){
-        read_ptr=buf;
-        write_ptr=buf;
-        available_length=max_size; 
-    }
-
-
-    Buffer(size_t size){
-        buf =(uint8_t *) malloc(size);
-        max_size=size;
-        clear();
-        write_mux = xSemaphoreCreateBinary();
-        read_mux = xSemaphoreCreateBinary();
-    }
-
-    ~Buffer(){
-        free(buf);
-    }
-    void write(uint8_t * data, size_t len){
-        xSemaphoreTake(write_mux, portMAX_DELAY);
-
-        uint8_t * old_ptr=write_ptr;
-        if(len>available_length){
-            uint32_t wrap_cnt=len-available_length;
-            write_ptr=buf+wrap_cnt;
-            xSemaphoreGive(write_mux);
-            memcpy(old_ptr,data,available_length);
-            memcpy(buf,data+available_length,wrap_cnt);
-            available_length=max_size-wrap_cnt;
-        }else{
-            write_ptr+=len;
-            xSemaphoreGive(write_mux);
-            memcpy(old_ptr,data,len);
-            available_length-=len;
-        }
-    }
-
-    void read_out(uint8_t * target,size_t len){
-        
-        xSemaphoreTake(read_mux, portMAX_DELAY);
-        uint8_t * old_ptr=read_ptr;
-        if(read_ptr+len>buf+max_size){
-            uint32_t first_cnt=buf+max_size-read_ptr;
-            read_ptr=buf+first_cnt;
-            xSemaphoreGive(read_mux);
-            memcpy(target,old_ptr,first_cnt);
-            memcpy(target+first_cnt,buf,len-first_cnt);
-        }else{
-            read_ptr+=len;
-            xSemaphoreGive(read_mux);
-            memcpy(target,old_ptr,len);
-        }
-    }
-
-    private:
-    uint8_t * buf;
-    size_t max_size;
-    size_t available_length;
-    uint8_t * write_ptr;
-    uint8_t * read_ptr;
-    SemaphoreHandle_t write_mux,read_mux;
-    
-};
-
-QueueHandle_t cam2fec_pipeline_queue;
-
-
-Transmitter transmitter(8,12,0);
-
-
+typedef enum{
+    IDLE,
+    RUN,
+    TEST_IMAGE_SIZE
+}camera_state_t;
 //#define WIFI_AP
 
 #if defined WIFI_AP
@@ -126,25 +56,18 @@ Transmitter transmitter(8,12,0);
     #define ESP_WIFI_IF WIFI_IF_STA
 #endif
 
-
-Stats s_stats;
+TaskHandle_t transmit_task_handler;
+QueueHandle_t transmit_data_ready_queue;
 Ground2Air_Data_Packet s_ground2air_data_packet;
 Ground2Air_Config_Packet s_ground2air_config_packet;     
 
-static int s_stats_last_tp = -10000;
-
-static TaskHandle_t s_wifi_tx_task = nullptr;
-static TaskHandle_t s_wifi_rx_task = nullptr;
-
-/////////////////////////////////////////////////////////////////////////
-
-static size_t s_video_frame_data_size = 0;
+static uint32_t frame_data_size = 0;
 static bool s_video_frame_started = false;
 static bool buffer_ready=true;
 
-static int64_t s_video_last_sent_tp = esp_timer_get_time();
-static int64_t s_video_last_acquired_tp = esp_timer_get_time();
-static int64_t s_video_target_frame_dt = 0;
+static uint8_t image_size_test_cnt=0;
+camera_state_t camera_state;
+
 
 /////////////////////////////////////////////////////////////////////////
 
@@ -317,61 +240,90 @@ void setup_wifi()
 }
 
 
-uint8_t CAMERA_BUFFER[2000];
-uint8_t Frame_buffer[8192];
+
+uint32_t test_image_size(){
+    uint32_t image_size;
+    image_size_test_cnt=5;
+    camera_state = TEST_IMAGE_SIZE;
+
+    while(camera_state==TEST_IMAGE_SIZE){
+        vTaskDelay(100);
+    };
+    image_size = frame_data_size/5;
+    return image_size;
+}
 
 IRAM_ATTR static void camera_data_available(const void* data, size_t stride, size_t count, bool last)
 {
-
-    static uint32_t frame_bytes_cnt=0;
-    if (data == nullptr && buffer_ready) //start frame
-    {
-        s_video_frame_started = true;        
+    static bool image_size_test_start=false;
+    static bool jump_this_frame=true;
+    bool completed=false;
+    size_t packet_size=0;
+    if (data == nullptr ) //start frame
+    {   
+        if(transmitter){
+            s_video_frame_started = true;
+        }
+        if(camera_state==TEST_IMAGE_SIZE){
+            image_size_test_start = true;
+        }    
     }
     else 
     {
-            const uint8_t* src = (const uint8_t*)data;
+        const uint8_t* src = (const uint8_t*)data;
 
-            if (last) //find the end marker for JPEG. Data after that can be discarded
+        if (last) //find the end marker for JPEG. Data after that can be discarded
+        {
+            const uint8_t* dptr = src + (count - 2) * stride;
+            while (dptr > src)
             {
-                const uint8_t* dptr = src + (count - 2) * stride;
-                while (dptr > src)
+                if (dptr[0] == 0xFF && dptr[stride] == 0xD9)
                 {
-                    if (dptr[0] == 0xFF && dptr[stride] == 0xD9)
-                    {
-                        count = (dptr - src) / stride + 2; //to include the 0xFFD9
-                        if ((count & 0x1FF) == 0)
-                            count += 1; 
-                        if ((count % 100) == 0)
-                            count += 1;
-                        break;
-                    }
-                    dptr -= stride;
+                    count = (dptr - src) / stride + 2; //to include the 0xFFD9
+                    // if ((count & 0x1FF) == 0)
+                    //     count += 1; 
+                    // if ((count % 100) == 0)
+                    //     count += 1;
+                    break;
                 }
+                dptr -= stride;
             }
+        }
 
-            uint8_t* ptr=transmitter.push(count);
-
-            for(int i=0; i<count; ++i){
+        if(!jump_this_frame &&  camera_state==RUN && s_video_frame_started){
+            uint8_t* ptr=transmitter->push(count,&packet_size,&completed);
+            
+            for(int i=0; i<count && ptr; ++i){
                 *ptr++ = *src; src += stride;
             }
-
             
-            if(s_video_frame_started){
-                memcpy(Frame_buffer+frame_bytes_cnt,CAMERA_BUFFER,count);
-                frame_bytes_cnt += count;
-                LOG("count:%ld\n",count);
+            if(completed){
+                xQueueSend(transmit_data_ready_queue,&packet_size,0);
             }
+        }
 
-            if(last && s_video_frame_started){
-                buffer_ready=false;
-                s_video_frame_data_size=frame_bytes_cnt;
-                frame_bytes_cnt=0;
-
-                cap_dts=micros()-last_cap_time;
-                last_cap_time=micros();
-                s_video_frame_started=false;
+        if(image_size_test_start && camera_state == TEST_IMAGE_SIZE){
+            //memcpy(Frame_buffer+frame_bytes_cnt,CAMERA_BUFFER,count);
+            frame_data_size += count;
+            if(last){
+                image_size_test_cnt--;
+                if(image_size_test_cnt==0){
+                    camera_state=IDLE;
+                }
+                image_size_test_start=false;
             }
+        }
+
+        if(last && s_video_frame_started ){
+            s_video_frame_started=false;
+            jump_this_frame=!jump_this_frame;
+            while(!completed && camera_state==RUN){ 
+                // we have achieved the end of the frame, while the fragment is not closed yet
+                // push some 0 size packet to make it close
+                transmitter->push(0,&packet_size,&completed); 
+            }
+            xQueueSend(transmit_data_ready_queue,&packet_size,0);
+        }
     }
 
 }
@@ -474,60 +426,16 @@ static void print_cpu_usage()
 #endif
 }
 
-
-#include "driver/uart.h"
-#include "soc/uart_periph.h"
-#include "esp_rom_gpio.h"
-#include "driver/gpio.h"
-uint8_t one_frame_buffer[8192]={0};
-uint8_t final_buffer[8192]={0};
-
-#define DEFAULT_UART_CHANNEL    (0)
-#define DEFAULT_UART_RX_PIN     (GPIO_NUM_3)
-#define DEFAULT_UART_TX_PIN     (GPIO_NUM_1)
-
-#define UARTS_BAUD_RATE         (115200)
-#define TASK_STACK_SIZE         (2048)
-#define READ_BUF_SIZE           (1024)
-
-
-static void configure_uarts(void)
-{
-    /* Configure parameters of an UART driver,
-     * communication pins and install the driver */
-    uart_config_t uart_config = {
-        .baud_rate = 115200,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_APB,
-    };
-
-    ESP_ERROR_CHECK(uart_driver_install(DEFAULT_UART_CHANNEL, READ_BUF_SIZE * 2, 0, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(DEFAULT_UART_CHANNEL, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(DEFAULT_UART_CHANNEL, DEFAULT_UART_TX_PIN, DEFAULT_UART_RX_PIN,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-}
-
-
-void construct_test_package(uint8_t * buff,int len){
-    int *p=(int * )buff;
-    for(int i=0;i<len/4;++i){
-        *p=i;
-        ++p;
-    }
-}
-void construct_test_package2(uint8_t * buff,int len){
-    uint8_t data=0;
-    for(int i=0;i<len;++i){
-        buff[i]=data;
-        data++;
+static void IRAM_ATTR transmit_task(void *pvParameters){
+    size_t packet_size;
+    while(true){
+        if(xQueueReceive(transmit_data_ready_queue, &packet_size, portMAX_DELAY) == pdTRUE) {
+            transmitter->send_packet(packet_size);
+        }
     }
 }
 
-#define TEST_CORRECT
-#undef TEST_CORRECT
+
 extern "C" void app_main()
 {
     Ground2Air_Data_Packet& ground2air_data_packet = s_ground2air_data_packet;
@@ -539,17 +447,15 @@ extern "C" void app_main()
     ground2air_config_packet.size = sizeof(ground2air_config_packet);
     ground2air_config_packet.wifi_rate = WIFI_Rate::RATE_G_6M_ODFM;
 
-    static uint8_t temp_buffer[1024];
-
     srand(esp_timer_get_time());
     //configure_uarts();
-    
+
+    transmit_data_ready_queue=xQueueCreate(32, sizeof(size_t));
 
     printf("Initializing...\n");
 
     printf("MEMORY at start: \n");
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
-    cam2fec_pipeline_queue = xQueueCreate(30, sizeof(PipelineData));
 
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -562,93 +468,26 @@ extern "C" void app_main()
 
     setup_wifi();
     init_camera();
-
+    
+    xTaskCreate(&transmit_task, "transmit_task", 4096, NULL, 9, &transmit_task_handler);
 
     esp_camera_fb_get(); //this will start the camera capture
 
+    float buffer_size=(float)test_image_size() * 1.5f;
+    printf("buffer size:%f\n",buffer_size);
+    transmitter = new Transmitter(8,12,0,(size_t) buffer_size,480);
+    for(int i=0;i<10;++i){
+        transmitter->send_session_key();
+    }
+    
+
+    camera_state=RUN;
+
     printf("MEMORY Before Loop: \n");
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
-    uart_driver_install(DEFAULT_UART_CHANNEL, READ_BUF_SIZE * 2, 0, 0, NULL, 0);
     while (true)
     {
-        static int cnt=0;
-        static size_t now_size=0;
-        static int len=0;
-        static uint8_t data[8];
         esp_task_wdt_reset();
-
-        vTaskDelay(10);
-
-        do {
-            len = uart_read_bytes(0, data,  1, 100 / portTICK_RATE_MS);
-        } while (len == 0);
-
-        #ifndef TEST_CORRECT
-        if(!buffer_ready){
-            now_size=s_video_frame_data_size;
-            memcpy(one_frame_buffer,Frame_buffer,s_video_frame_data_size);
-            buffer_ready=true;
-            cnt++;
-            transmitter.send_session_key();
-        }
-        #else
-            construct_test_package2(one_frame_buffer,5000);
-            now_size=5000;
-        #endif
-
-        size_t one_cycle_size=now_size/8;
-
-
-        for(int i=0;i<8;++i){
-            //temp_buffer[0]=(uint8_t )i;
-            if(i==7){
-                transmitter.send_session_key();
-                //memcpy(temp_buffer+1,one_frame_buffer+i*one_cycle_size,now_size-i*one_cycle_size);
-                transmitter.send_packet(one_frame_buffer+i*one_cycle_size,now_size-i*one_cycle_size,0);
-                //transmitter.send_packet(temp_buffer,now_size-i*one_cycle_size+1,0);
-                LOG("send size:%d, cnt:%d\n",now_size-i*one_cycle_size,i);
-            }else{
-                //memcpy(temp_buffer+1,one_frame_buffer+i*one_cycle_size,one_cycle_size);
-                //transmitter.send_packet(temp_buffer,one_cycle_size+1,0);
-                transmitter.send_packet(one_frame_buffer+i*one_cycle_size,one_cycle_size,0);
-                LOG("send size:%d, cnt:%d\n",one_cycle_size,i);
-            }
-            //vTaskDelay(100);
-        }
-
-        // do {
-        //     len = uart_read_bytes(0, data,  1, 250 / portTICK_RATE_MS);
-        // } while (len == 0);
-        // vTaskDelay(100);
-        // uart_write_bytes(0,&now_size,sizeof(size_t));
-        // vTaskDelay(100);
-        // uart_write_bytes(0,one_frame_buffer,now_size);
-        // continue;
-        
-
-        
-
-        
-        // if (s_uart_verbose > 0 && millis() - s_stats_last_tp >= 1000)
-        // {
-        //     s_stats_last_tp = millis();
-        //     //LOG("WLAN S: %d, R: %d, E: %d, D: %d, %%: %d || FPS: %d, D: %d || D: %d, E: %d\n",
-        //     //    s_stats.wlan_data_sent, s_stats.wlan_data_received, s_stats.wlan_error_count, s_stats.wlan_received_packets_dropped, s_wlan_outgoing_queue.size() * 100 / s_wlan_outgoing_queue.capacity(),
-        //     //    (int)s_stats.video_frames, s_stats.video_data, s_stats.sd_data, s_stats.sd_drops);
-        //     print_cpu_usage();
-
-        //     if(s_video_frame_end){
-        //         pipeline_buffer->read_out(CAMERA_BUFFER,);
-        //     }
-        //     transmitter.send_packet(CAMERA_BUFFER,1600,0);
-
-        //     transmitter.send_session_key();
-        //     //esp_wifi_80211_tx(ESP_WIFI_IF, CAMERA_BUFFER, 500, false);
-        //     s_stats = Stats();
-        // }
-
-        // vTaskDelay(10);
-        
-
+        vTaskDelay(100);
     }
 }
