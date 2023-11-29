@@ -37,8 +37,8 @@ jobs:
         bind_mount_repository: true
         commands: |
           echo "commands to build gs"
-          mkdir ./dst/
-          cd gs
+          cd ./gs
+          mkdir ./dst
           apt-get update -y
           apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
           make -j4
