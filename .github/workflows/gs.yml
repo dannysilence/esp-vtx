@@ -10,28 +10,38 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
-    
+    matrix:
+      target: [armhf, arm64]
+      includes:
+      - target: armhf
+        cpu: cortex-a7
+        base_image: raspi_2_bullseye:20230102
+      - target: arm64
+        cpu: cortex-a53
+        base_image: raspi_4_bullseye:20230102
     steps:
       - uses: actions/checkout@v2
         with:
           submodules: 'true'
-      - name: ARM runner
+      - name: build 
         uses: pguyot/arm-runner-action@v2.5.2
         id: build_image
         with:
-          base_image: raspios_lite:2022-04-04
+          image_additional_mb: 1024
+          base_image: ${{ matrix.base_image }}
+          cpu: ${{ matrix.cpu }}
           bind_mount_repository: true
+          copy_repository_path: '/src/'
+          copy_artifacts_path: '/src/gs/gs'
           commands: |
             echo "commands to build gs"
             cd gs
             apt-get update -y
             apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
             make -j4
-            ls -faln ./
       - name: Compress the release image
         if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
         run: |
-          mv ${{ steps.build_image.outputs.image }} release-image.img
-          xz -0 -T 0 -v release-image.img
+          xz -0 -T 0 -v --files=./gs gs-${{ matrix.target }}.tar.gz
         
             
