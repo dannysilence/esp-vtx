@@ -35,18 +35,17 @@ jobs:
         base_image: ${{ matrix.base_image }}
         cpu: ${{ matrix.cpu }}
         bind_mount_repository: true
-        copy_artifact_path: '/dst/'
         commands: |
           echo "commands to build gs"
-          mkdir /dst/
+          mkdir ./dst/
           cd gs
           apt-get update -y
           apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
           make -j4
           ls ./ -faln
-          mv gs /dst/ 
-          mv ../README.md /dst/
-          cd /dst/
+          mv gs ./dst/ 
+          mv ..README.md ./dst/
+          cd dst
           zip gs-${{ matrix.target }}.zip gs README.md
     - name: Create Release
       if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
@@ -70,7 +69,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
-        asset_path: ./gs-armhf.zip
+        asset_path: ./gs/dst/gs-armhf.zip
         asset_name: gs-armhf.zip
         asset_content_type: application/zip
     - name: Upload Release Asset 2
@@ -81,7 +80,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
-        asset_path: ./gs-arm64.zip
+        asset_path: ./gs/dst/gs-arm64.zip
         asset_name: gs-arm64.zip
         asset_content_type: application/zip        
         
