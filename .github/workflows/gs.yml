@@ -17,6 +17,7 @@ jobs:
         id: build_image
         with:
           base_image: raspios_lite:2022-04-04
+          bind_mount_repository: true
           commands: |
             echo "commands to build gs"
             cd gs
