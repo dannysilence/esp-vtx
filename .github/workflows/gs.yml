@@ -19,6 +19,7 @@ jobs:
           base_image: raspios_lite:2022-04-04
           commands: |
             echo "commands to build gs"
+            apt-get update -y
             apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
             make -j 4
             ls -faln ./
