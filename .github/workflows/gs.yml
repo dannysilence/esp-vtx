@@ -44,7 +44,7 @@ jobs:
           make -j4
           ls ./ -faln
           mv gs ./dst/ 
-          mv ..README.md ./dst/
+          mv ../README.md ./dst/
           cd dst
           zip gs-${{ matrix.target }}.zip gs README.md
     - name: Create Release
