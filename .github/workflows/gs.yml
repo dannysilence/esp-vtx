@@ -17,10 +17,10 @@ jobs:
         include:
         - target: armhf
           cpu: cortex-a7
-          base_image: raspi_2_bullseye:20230102
+          base_image: raspios_lite:latest
         - target: arm64
           cpu: cortex-a53
-          base_image: raspi_4_bullseye:20230102
+          base_image: raspios_lite_arm64:latest
     steps:
     - uses: actions/checkout@v2
       with:
