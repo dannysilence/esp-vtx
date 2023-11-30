@@ -37,11 +37,12 @@ jobs:
         image_additional_mb: 1024
         base_image: ${{ matrix.base_image }}
         cpu: ${{ matrix.cpu }}
-        bind_mount_repository: true
+        #bind_mount_repository: true
+        copy_repository_path: '/src/'
         copy_artifact_path: gs-${{ matrix.target }}.zip
         commands: |
           echo "commands to build gs"
-          cd ./gs
+          cd /src/gs/
           mkdir ./dst
           apt-get update -y
           apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
@@ -51,5 +52,5 @@ jobs:
           mv ../README.md ./dst/
           cd dst
           zip gs-${{ matrix.target }}.zip gs README.md
-          cd ../../
+          cd /src/
           mv gs/dst/gs-${{ matrix.target }}.zip ./
