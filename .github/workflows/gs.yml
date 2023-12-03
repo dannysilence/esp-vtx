@@ -1,4 +1,4 @@
-name: GroundStation CI
+name: esp-vtx air and ground 
 
 on:
   push:
@@ -7,7 +7,23 @@ on:
       - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
     
 jobs:
-  build:
+  air:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v2
+      with:
+        submodules: 'recursive'
+    - name: esp-idf build
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v4.4
+        target: esp32
+        path: 'air_firmware'
+
+  ground:
     permissions:
       contents: write
       packages: write 
@@ -68,7 +84,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
       with:
         tag_name: ${{ steps.tag_version.outputs.new_tag }}
-        release_name: Release ${{ steps.tag_version.outputs.new_tag }}
+        release_name: Ground Station ${{ steps.tag_version.outputs.new_tag }}
         body: ${{ steps.tag_version.outputs.changelog }}
         draft: false
         prerelease: false
