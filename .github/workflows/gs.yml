@@ -54,7 +54,7 @@ jobs:
           zip gs-${{ matrix.target }}.zip gs README.md
           cd /src
           mv gs/dst/gs-${{ matrix.target }}.zip ./
-          echo "Done with ${{ steps.get_version.VERSION }}"
+          echo "Done with ${{ steps.get_version.outputs.VERSION }}"
     - name: Create Release
       if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
       id: create_release
