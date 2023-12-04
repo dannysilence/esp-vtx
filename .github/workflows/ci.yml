@@ -127,7 +127,7 @@ jobs:
         cpu: ${{ matrix.cpu }}
         #bind_mount_repository: true
         copy_repository_path: '/src'
-        copy_artifact_path: gs
+        copy_artifact_path: gs-${{ matrix.target }}
         commands: |
           echo "commands to build gs"
           cd /src/gs
@@ -136,12 +136,12 @@ jobs:
           apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
           make -j4
           ls ./ -faln
-          mv gs ./
+          mv gs /src/gs-${{ matrix.target }}
           echo "Done with ${{ steps.get_version.outputs.VERSION }}"
     - name: Get Release File Name & Upload URL
       id: get_release_info
       run: |
-        echo ::set-output name=file_name::gs
+        echo ::set-output name=file_name::gs-${{ matrix.target }}
         value=`cat release_url/release_url.txt`
         echo ::set-output name=upload_url::$value
       env:
@@ -154,7 +154,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.get_release_info.outputs.upload_url }}
-        asset_path: ./gs
-        asset_name: ${{ steps.get_release_info.outputs.file_name }}-${{ matrix.target }}
+        asset_path: ./gs-${{ matrix.target }}
+        asset_name: ${{ steps.get_release_info.outputs.file_name }}
         asset_content_type: application/zip
         
