@@ -50,6 +50,10 @@ jobs:
     needs: [init]
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32, esp32s3]
     steps:
     - name: Checkout repo
       uses: actions/checkout@v2
@@ -64,7 +68,7 @@ jobs:
       id: run_build
       with:
         esp_idf_version: v4.4
-        target: esp32
+        target: ${{ matrix.target }}
         path: 'air_firmware'
     - name: Get Release File Name & Upload URL
       id: get_release_info
@@ -83,7 +87,7 @@ jobs:
       with:
         upload_url: ${{ steps.get_release_info.outputs.upload_url }}
         asset_path: ./air_firmware/build/air_firmware.bin
-        asset_name: ${{ steps.get_release_info.outputs.file_name }}.bin
+        asset_name: ${{ steps.get_release_info.outputs.file_name }}-${{ matrix.target }}.bin
         asset_content_type: application/zip
 
   ground:
@@ -123,7 +127,7 @@ jobs:
         cpu: ${{ matrix.cpu }}
         #bind_mount_repository: true
         copy_repository_path: '/src'
-        copy_artifact_path: gs.zip
+        copy_artifact_path: gs
         commands: |
           echo "commands to build gs"
           cd /src/gs
@@ -132,12 +136,7 @@ jobs:
           apt install -y libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev 
           make -j4
           ls ./ -faln
-          mv gs ./dst/ 
-          mv ../README.md ./dst/
-          cd dst
-          zip gs.zip gs README.md
-          cd /src
-          mv gs/dst/gs.zip ./
+          mv gs ./
           echo "Done with ${{ steps.get_version.outputs.VERSION }}"
     - name: Get Release File Name & Upload URL
       id: get_release_info
@@ -155,7 +154,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.get_release_info.outputs.upload_url }}
-        asset_path: ./gs.zip
-        asset_name: ${{ steps.get_release_info.outputs.file_name }}-${{ matrix.target }}.zip
+        asset_path: ./gs
+        asset_name: ${{ steps.get_release_info.outputs.file_name }}-${{ matrix.target }}
         asset_content_type: application/zip
         
