@@ -61,6 +61,7 @@ jobs:
         name: release_url
     - name: esp-idf build
       uses: espressif/esp-idf-ci-action@v1
+      id: run_build
       with:
         esp_idf_version: v4.4
         target: esp32
@@ -81,7 +82,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.get_release_info.outputs.upload_url }}
-        asset_path: ./build/air_firmware.bin
+        asset_path: ./air_firmware/build/air_firmware.bin
         asset_name: ${{ steps.get_release_info.outputs.file_name }}.bin
         asset_content_type: application/zip
 
@@ -122,7 +123,7 @@ jobs:
         cpu: ${{ matrix.cpu }}
         #bind_mount_repository: true
         copy_repository_path: '/src'
-        copy_artifact_path: gs-${{ matrix.target }}.zip
+        copy_artifact_path: gs.zip
         commands: |
           echo "commands to build gs"
           cd /src/gs
