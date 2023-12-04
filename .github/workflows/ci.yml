@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [esp32, esp32s3]
+        target: [esp32]
     steps:
     - name: Checkout repo
       uses: actions/checkout@v2
