@@ -62,6 +62,8 @@
         "utility": "cpp",
         "vector": "cpp"
     },
+    "idf.adapterTargetName": "esp32"
+    },
     "idf.adapterTargetName": "esp32",
     "idf.portWin": "COM5",
     "idf.openOcdConfigs": [

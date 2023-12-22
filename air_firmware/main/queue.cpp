@@ -1,5 +1,5 @@
 #include "queue.h"
-#include "structures.h"
+
 
 Queue s_wlan_incoming_queue;
 Queue s_wlan_outgoing_queue;

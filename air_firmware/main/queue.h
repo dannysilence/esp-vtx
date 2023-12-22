@@ -2,7 +2,7 @@
 
 #include <cassert>
 #include <cstring>
-#include "structures.h"
+
 #ifdef ESP_PLATFORM
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"

@@ -58,6 +58,8 @@ https://user-images.githubusercontent.com/10252034/116135308-43c08c00-a6d1-11eb-
 - The UI uses ImGui and is touch driven - but mouse should work as well
 - Dependencies:
 	`sudo apt install libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev libfreetype6-dev `
+	or
+	`sudo apt install libdrm-dev libgbm-dev libgles2-mesa-dev libpcap-dev libturbojpeg0-dev libts-dev libsdl2-dev `
 - In the gs folder, execute `make -j4`
 - Run `sudo -E DISPLAY=:0 ./gs`
 

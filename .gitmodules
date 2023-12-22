@@ -1,9 +1,5 @@
 
-[submodule "gs/src/imgui"]
-	path = gs/src/imgui
-	url = https://github.com/ocornut/imgui.git
 
-[submodule "air_firmware/components/esp32-camera"]
-	path = air_firmware/components/esp32-camera
-	url = https://github.com/Ncerzzk/esp32-camera.git
-
+[submodule "wifibroadcast"]
+	path = wifibroadcast
+	url = git@github.com:Ncerzzk/wifibroadcast.git
