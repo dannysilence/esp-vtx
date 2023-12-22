@@ -68,7 +68,7 @@ jobs:
       uses: espressif/esp-idf-ci-action@v1
       id: run_build
       with:
-        esp_idf_version: v5.0
+        esp_idf_version: v4.4
         target: ${{ matrix.target }}
         path: 'air_firmware'
     - name: Get Release File Name & Upload URL
